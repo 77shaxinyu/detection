@@ -148,7 +148,7 @@ with st.sidebar:
         os.makedirs(TEMP_DIR, exist_ok=True)
         st.rerun()
 
-st.title("PCB Component Counter & Locator / PCB元件计数与定位系统")
+st.title("PCB Detection System / PCB检测系统")
 
 # Load Model
 @st.cache_resource
