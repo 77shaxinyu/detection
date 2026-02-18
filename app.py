@@ -19,7 +19,6 @@ from ultralytics.nn.modules.conv import Conv
 # 1. System Initialization / 系统初始化
 # ==========================================
 TEMP_DIR = "temp_results"
-# 仅在目录不存在时创建，避免切换模型时误删文件导致读取报错
 if not os.path.exists(TEMP_DIR):
     os.makedirs(TEMP_DIR, exist_ok=True)
 
@@ -128,6 +127,9 @@ st.set_page_config(page_title="PCB Detection System", layout="wide")
 
 with st.sidebar:
     st.header("Configuration / 配置")
+    # 新增模式选择
+    proc_mode = st.radio("Processing Mode / 处理模式", ["Interactive (交互预览)", "Fast Batch Scan (快速批量扫描)"])
+    
     model_choice = st.selectbox("Select Model / 选择检测模型", ["Model 1", "Model 2"])
     algo_choice = st.selectbox("Select Algorithm / 选择定位算法", ["Algorithm 1", "Algorithm 2"])
     conf_thresh = st.slider("Confidence Threshold / 置信度阈值", 0.1, 1.0, 0.25)
@@ -154,77 +156,117 @@ if uploaded_files:
     if model is None:
         st.error("Model not found in models/ folder.")
     else:
-        for file in uploaded_files:
-            file_base = os.path.splitext(file.name)[0]
-            # 这里的路径包含了模型信息，防止切换模型时读取旧图
-            target_path = os.path.join(TEMP_DIR, f"{file_base}_{model_choice}_annotated.jpg")
+        # 批量扫描模式逻辑 (不绘图，仅汇总)
+        if proc_mode == "Fast Batch Scan (快速批量扫描)":
+            st.info(f"Fast scanning {len(uploaded_files)} images... / 正在快速扫描并汇总...")
+            progress_bar = st.progress(0)
             
-            # 如果文件不存在，则重新运行检测
-            if not os.path.exists(target_path):
-                file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
-                img = cv2.imdecode(file_bytes, 1)
-                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            for idx, file in enumerate(uploaded_files):
+                # 检查当前模型下是否已检测过
+                if not any(d['File'] == file.name for d in st.session_state.history):
+                    file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
+                    img = cv2.imdecode(file_bytes, 1)
+                    h, w = img.shape[:2]
+                    
+                    # 仅执行模型推理，关闭绘图和详细输出
+                    results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True, verbose=False)
+                    
+                    for r in results:
+                        for box in r.boxes:
+                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                            cls = model.names[int(box.cls[0])]
+                            st.session_state.history.append({
+                                "File": file.name,
+                                "Type / 类型": get_component_type(cls),
+                                "Class / 类别": cls,
+                                "Confidence / 置信度": f"{float(box.conf[0]):.2f}",
+                                "Grid / 网格": get_grid_pos((x1+x2)/2, (y1+y2)/2, h/9, w/9),
+                                "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})"
+                            })
+                progress_bar.progress((idx + 1) / len(uploaded_files))
+            st.success("Batch Scan Complete! / 快速扫描完成！")
+        
+        # 交互预览模式逻辑 (保留原逻辑：绘图、显示)
+        else:
+            for file in uploaded_files:
+                file_base = os.path.splitext(file.name)[0]
+                target_path = os.path.join(TEMP_DIR, f"{file_base}_{model_choice}_annotated.jpg")
                 
-                # 算法辅助显示
-                img_feat = process_features(img_rgb.copy(), algo_choice)
-                grid_img, ch, cw = draw_grid_9x9(img_feat)
-                
-                # YOLO 检测
-                results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True)
-                
-                img_data_list = []
-                # 清除当前文件的旧历史记录，避免切换模型后累加
-                st.session_state.history = [d for d in st.session_state.history if d['File'] != file.name]
-                
-                for r in results:
-                    for box in r.boxes:
-                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                        cls = model.names[int(box.cls[0])]
-                        pos = get_grid_pos((x1+x2)/2, (y1+y2)/2, ch, cw)
-                        entry = {
-                            "File": file.name,
-                            "Type / 类型": get_component_type(cls),
-                            "Class / 类别": cls,
-                            "Confidence / 置信度": f"{float(box.conf[0]):.2f}",
-                            "Grid / 网格": pos,
-                            "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})"
-                        }
-                        st.session_state.history.append(entry)
-                        img_data_list.append(entry)
-                        cv2.rectangle(grid_img, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
-                        cv2.putText(grid_img, f"{cls} {pos}", (int(x1), int(y1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-                
-                # 保存检测后的图片
-                cv2.imwrite(target_path, cv2.cvtColor(grid_img, cv2.COLOR_RGB2BGR))
-                pd.DataFrame(img_data_list).to_csv(os.path.join(TEMP_DIR, f"{file_base}_data.csv"), index=False, encoding='utf-8-sig')
+                if not os.path.exists(target_path):
+                    file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
+                    img = cv2.imdecode(file_bytes, 1)
+                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    
+                    img_feat = process_features(img_rgb.copy(), algo_choice)
+                    grid_img, ch, cw = draw_grid_9x9(img_feat)
+                    
+                    results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True)
+                    
+                    img_data_list = []
+                    st.session_state.history = [d for d in st.session_state.history if d['File'] != file.name]
+                    
+                    for r in results:
+                        for box in r.boxes:
+                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                            cls = model.names[int(box.cls[0])]
+                            pos = get_grid_pos((x1+x2)/2, (y1+y2)/2, ch, cw)
+                            entry = {
+                                "File": file.name,
+                                "Type / 类型": get_component_type(cls),
+                                "Class / 类别": cls,
+                                "Confidence / 置信度": f"{float(box.conf[0]):.2f}",
+                                "Grid / 网格": pos,
+                                "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})"
+                            }
+                            st.session_state.history.append(entry)
+                            img_data_list.append(entry)
+                            cv2.rectangle(grid_img, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
+                            cv2.putText(grid_img, f"{cls} {pos}", (int(x1), int(y1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                    
+                    cv2.imwrite(target_path, cv2.cvtColor(grid_img, cv2.COLOR_RGB2BGR))
+                    pd.DataFrame(img_data_list).to_csv(os.path.join(TEMP_DIR, f"{file_base}_data.csv"), index=False, encoding='utf-8-sig')
 
-        # 展示当前图片的检测结果汇总
+        # 结果汇总展示
         if st.session_state.history:
             st.divider()
             df_all = pd.DataFrame(st.session_state.history)
-            last_file_name = uploaded_files[-1].name
-            df_curr = df_all[df_all["File"] == last_file_name]
             
-            # 组件计数逻辑
-            res_c = int(len(df_curr[df_curr["Type / 类型"].str.contains("Resistor")]) / 2)
-            cap_c = int(len(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")]) / 2)
+            # 如果是快速扫描模式，直接显示大表和汇总下载
+            if proc_mode == "Fast Batch Scan (快速批量扫描)":
+                st.subheader("Summary Table / 检测结果总表")
+                st.dataframe(df_all, use_container_width=True)
+                
+                sum_csv = df_all.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+                st.download_button(
+                    label="Download Consolidated Report / 下载汇总报表",
+                    data=sum_csv,
+                    file_name=f"Batch_Scan_{model_choice}_Report.csv",
+                    mime="text/csv"
+                )
             
-            c1, c2, c3 = st.columns(3)
-            c1.info(f"Resistors / 电阻: {res_c}")
-            c2.info(f"Capacitors / 电容: {cap_c}")
-            c3.success(f"Total / 总计: {res_c + cap_c}")
-            
-            # 安全展示图片
-            f_base = os.path.splitext(last_file_name)[0]
-            display_path = os.path.join(TEMP_DIR, f"{f_base}_{model_choice}_annotated.jpg")
-            if os.path.exists(display_path):
-                img_to_show = cv2.imread(display_path)
-                if img_to_show is not None:
-                    st.image(cv2.cvtColor(img_to_show, cv2.COLOR_BGR2RGB), use_column_width=True)
-            st.dataframe(df_curr)
+            # 如果是交互预览模式，保持原来的显示逻辑
+            else:
+                last_file_name = uploaded_files[-1].name
+                df_curr = df_all[df_all["File"] == last_file_name]
+                
+                res_c = int(len(df_curr[df_curr["Type / 类型"].str.contains("Resistor")]) / 2)
+                cap_c = int(len(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")]) / 2)
+                
+                c1, c2, c3 = st.columns(3)
+                c1.info(f"Resistors / 电阻: {res_c}")
+                c2.info(f"Capacitors / 电容: {cap_c}")
+                c3.success(f"Total / 总计: {res_c + cap_c}")
+                
+                f_base = os.path.splitext(last_file_name)[0]
+                display_path = os.path.join(TEMP_DIR, f"{f_base}_{model_choice}_annotated.jpg")
+                if os.path.exists(display_path):
+                    img_to_show = cv2.imread(display_path)
+                    if img_to_show is not None:
+                        st.image(cv2.cvtColor(img_to_show, cv2.COLOR_BGR2RGB), use_column_width=True)
+                st.dataframe(df_curr)
 
-# ZIP 下载逻辑 (保持结构化下载)
-if st.session_state.history:
+# ZIP 下载逻辑 (仅在非快速扫描模式或历史记录存在时显示)
+if st.session_state.history and proc_mode == "Interactive (交互预览)":
     st.divider()
     folder_name = f"{model_choice}_{algo_choice.strip()}"
     zip_buf = io.BytesIO()
