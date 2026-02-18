@@ -117,25 +117,39 @@ def get_component_type(class_name):
 
 def process_features(image, algorithm):
     """
-    在没有模板图的情况下，提取并绘制特征点，用于展示图像纹理细节。
+    视觉增强版特征提取：
+    使用大号实心彩色圆点绘制特征，确保肉眼可见。
     """
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     keypoints = []
+    
+    # 创建一个副本用于绘制，避免直接修改原图导致后续处理重叠混乱
+    out_img = image.copy()
     
     if "SIFT" in algorithm:
         try:
             sift = cv2.SIFT_create()
             keypoints, _ = sift.detectAndCompute(gray, None)
-            # 绘制 SIFT 特征点 (红色小圆圈)
-            out_img = cv2.drawKeypoints(image, keypoints, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+            
+            # 手动绘制 SIFT 特征点：青色 (Cyan) 实心圆
+            # 颜色格式为 RGB: (0, 255, 255)
+            for kp in keypoints:
+                x, y = int(kp.pt[0]), int(kp.pt[1])
+                cv2.circle(out_img, (x, y), 3, (0, 255, 255), -1)
+                
         except Exception:
-            # 某些 OpenCV 版本可能不支持 SIFT，降级处理
             return image, 0
+            
     elif "ORB" in algorithm:
-        orb = cv2.ORB_create(nfeatures=1000)
+        orb = cv2.ORB_create(nfeatures=2000) # 增加点数上限以展示更多细节
         keypoints, _ = orb.detectAndCompute(gray, None)
-        # 绘制 ORB 特征点 (绿色小圆圈)
-        out_img = cv2.drawKeypoints(image, keypoints, None, color=(0,255,0), flags=0)
+        
+        # 手动绘制 ORB 特征点：品红 (Magenta) 实心圆
+        # 颜色格式为 RGB: (255, 0, 255)
+        for kp in keypoints:
+            x, y = int(kp.pt[0]), int(kp.pt[1])
+            cv2.circle(out_img, (x, y), 3, (255, 0, 255), -1)
+            
     else:
         return image, 0
         
@@ -158,7 +172,7 @@ with st.sidebar:
     # 这里的算法现在有了视觉效果
     algo_choice = st.selectbox(
         "Select Algorithm / 选择定位算法", 
-        ["Algorithm 1 ", "Algorithm 2 "]
+        ["Algorithm 1 (SIFT)", "Algorithm 2 (ORB)"]
     )
     
     conf_thresh = st.slider(
@@ -211,8 +225,8 @@ if uploaded_files:
                 img = cv2.imdecode(file_bytes, 1)
                 img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 
-                # 2. 运行特征提取算法 (SIFT/ORB)
-                # 这会在 img_rgb 上画出特征点，变成 img_with_features
+                # 2. 运行特征提取算法 (SIFT/ORB) - 增强版
+                # 这会在 img_rgb 上画出非常明显的大圆点
                 img_with_features, kp_count = process_features(img_rgb.copy(), algo_choice)
                 
                 # 3. 在有特征点的图上画网格
@@ -257,6 +271,9 @@ if uploaded_files:
                 save_csv_path = os.path.join(TEMP_DIR, f"{file_base}_data.csv")
                 pd.DataFrame(img_data_list).to_csv(save_csv_path, index=False, encoding='utf-8-sig')
 
+                # 保存特征点数量到 history (可选，如果想在表格里也看的话)
+                # 这里暂时不存入表格，只做显示用
+
         # 显示部分
         if st.session_state.history:
             st.divider()
@@ -280,13 +297,20 @@ if uploaded_files:
             with c3:
                 st.success(f"Total / 总计: {total_comps}")
             
+            # --- 新增：显示特征提取信息 ---
+            # 由于 kp_count 是局部变量，我们需要重新获取一下最后一张图的特征点数用于显示
+            # 或者我们可以简单地再次调用一下处理函数（虽然有一点点性能损耗，但在 Streamlit 里最简单）
+            # 为了准确显示，我们可以在这里加一行文字说明当前算法
+            
+            st.caption(f"Algorithm Visuals: {algo_choice} points are marked in color.")
+            
             file_base = os.path.splitext(last_file_name)[0]
             temp_img_show_path = os.path.join(TEMP_DIR, f"{file_base}_annotated.jpg")
             
             if os.path.exists(temp_img_show_path):
                 show_img = cv2.imread(temp_img_show_path)
                 st.image(cv2.cvtColor(show_img, cv2.COLOR_BGR2RGB), 
-                         caption=f"Result: {last_file_name} (含特征点检测)", use_column_width=True)
+                         caption=f"Result: {last_file_name} (含 {algo_choice} 特征点)", use_column_width=True)
             
             st.dataframe(df_curr)
 
