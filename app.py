@@ -106,8 +106,6 @@ def get_grid_pos(x_center, y_center, cell_h, cell_w):
     return f"{col}{row}"
 
 def sanitize_name(name):
-    if "(" in name:
-        return name.split("(")[1].split(")")[0]
     return name.replace(" ", "_")
 
 def get_component_type(class_name):
@@ -122,11 +120,26 @@ def get_component_type(class_name):
 # ==========================================
 st.set_page_config(page_title="PCB Detection System", layout="wide")
 
+# Sidebar Configuration
 with st.sidebar:
-    st.header("Configuration / 配置中心")
-    model_choice = st.selectbox("Select Model / 选择检测模型", ["Model 2 (CBAM)", "Model 1 (SE)"])
-    algo_choice = st.selectbox("Select Algorithm / 选择定位算法", ["Algorithm 1 (SIFT)", "Algorithm 2 (ORB)"])
-    conf_thresh = st.slider("Confidence Threshold / 置信度阈值", 0.1, 1.0, 0.25)
+    st.header("Configuration / 配置")
+    
+    # 简化选项，不再显示具体算法名
+    model_choice = st.selectbox(
+        "Select Model / 选择检测模型", 
+        ["Model 1", "Model 2"]
+    )
+    
+    algo_choice = st.selectbox(
+        "Select Algorithm / 选择定位算法", 
+        ["Algorithm 1", "Algorithm 2"]
+    )
+    
+    conf_thresh = st.slider(
+        "Confidence Threshold / 置信度阈值", 
+        0.1, 1.0, 0.25
+    )
+    
     st.divider()
     if st.button("Clear Records / 清空记录"):
         st.session_state.history = []
@@ -137,9 +150,15 @@ with st.sidebar:
 
 st.title("PCB Component Counter & Locator / PCB元件计数与定位系统")
 
+# Load Model
 @st.cache_resource
 def load_pcb_model(choice):
-    path = "models/best_se.pt" if "SE" in choice else "models/best_cbam.pt"
+    # 后台映射：Model 1 -> SE, Model 2 -> CBAM
+    if choice == "Model 1":
+        path = "models/best_se.pt"
+    else:
+        path = "models/best_cbam.pt"
+        
     if os.path.exists(path):
         return YOLO(path)
     return None
@@ -149,7 +168,11 @@ model = load_pcb_model(model_choice)
 if "history" not in st.session_state:
     st.session_state.history = []
 
-uploaded_files = st.file_uploader("Upload PCB Images / 上传图片 (支持批量)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+uploaded_files = st.file_uploader(
+    "Upload PCB Images / 上传图片 (支持批量)", 
+    type=["jpg", "jpeg", "png"], 
+    accept_multiple_files=True
+)
 
 if uploaded_files:
     if model is None:
@@ -157,58 +180,61 @@ if uploaded_files:
     else:
         for file in uploaded_files:
             if not any(d['File'] == file.name for d in st.session_state.history):
+                
                 file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
                 img = cv2.imdecode(file_bytes, 1)
                 img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                
                 grid_img, ch, cw = draw_grid_9x9(img_rgb)
                 
-                # --- 关键修改：加入去重参数 ---
-                # iou=0.5: 重叠度超过50%就合并
-                # agnostic_nms=True: 不管类别是什么，只要位置重叠就只保留一个
+                # 去重参数
                 results = model.predict(img, conf=conf_thresh, iou=0.5, agnostic_nms=True)
                 
                 img_data_list = []
+                
                 for r in results:
                     for box in r.boxes:
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                        
                         cls_name = model.names[int(box.cls[0])]
                         conf_val = float(box.conf[0])
                         
+                        # 移除时间字段
                         entry = {
                             "File": file.name,
                             "Type / 类型": get_component_type(cls_name),
                             "Class / 类别": cls_name,
                             "Confidence / 置信度": f"{conf_val:.2f}",
                             "Grid / 网格": get_grid_pos(cx, cy, ch, cw),
-                            "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})",
-                            "Time": datetime.now().strftime("%H:%M:%S")
+                            "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})"
                         }
+                        
                         st.session_state.history.append(entry)
                         img_data_list.append(entry)
                         
                         cv2.rectangle(grid_img, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
-                        cv2.putText(grid_img, f"{cls_name} {entry['Grid / 网格']}", (int(x1), int(y1)-5),
+                        label_text = f"{cls_name} {entry['Grid / 网格']}"
+                        cv2.putText(grid_img, label_text, (int(x1), int(y1)-5),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
                 
                 file_base = os.path.splitext(file.name)[0]
                 save_img_path = os.path.join(TEMP_DIR, f"{file_base}_annotated.jpg")
                 cv2.imwrite(save_img_path, cv2.cvtColor(grid_img, cv2.COLOR_RGB2BGR))
+                
                 save_csv_path = os.path.join(TEMP_DIR, f"{file_base}_data.csv")
                 pd.DataFrame(img_data_list).to_csv(save_csv_path, index=False, encoding='utf-8-sig')
 
         if st.session_state.history:
             st.divider()
+            
             df_all = pd.DataFrame(st.session_state.history)
             last_file_name = uploaded_files[-1].name
             df_curr = df_all[df_all["File"] == last_file_name]
             
-            # --- 计数逻辑修改 ---
             res_df = df_curr[df_curr["Type / 类型"].str.contains("Resistor")]
             cap_df = df_curr[df_curr["Type / 类型"].str.contains("Capacitor")]
             
-            # 使用 int() 向下取整，避免出现 0.5
-            # 如果是 3 个框，除以 2 变成 1.5，int() 后变成 1，比较符合直觉
             res_comps = int(len(res_df) / 2)
             cap_comps = int(len(cap_df) / 2)
             total_comps = res_comps + cap_comps
@@ -223,27 +249,37 @@ if uploaded_files:
             
             file_base = os.path.splitext(last_file_name)[0]
             temp_img_show_path = os.path.join(TEMP_DIR, f"{file_base}_annotated.jpg")
+            
             if os.path.exists(temp_img_show_path):
                 show_img = cv2.imread(temp_img_show_path)
-                st.image(cv2.cvtColor(show_img, cv2.COLOR_BGR2RGB), caption=f"Result: {last_file_name}", use_column_width=True)
+                st.image(cv2.cvtColor(show_img, cv2.COLOR_BGR2RGB), 
+                         caption=f"Result: {last_file_name}", use_column_width=True)
+            
             st.dataframe(df_curr)
 
 if st.session_state.history:
     st.divider()
+    
+    # 文件夹命名逻辑: Model_1_Algorithm_1
     m_name = sanitize_name(model_choice)
     a_name = sanitize_name(algo_choice)
     folder_struct = f"{m_name}_{a_name}"
     
     zip_buffer = io.BytesIO()
+    
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         unique_files = list(set([h['File'] for h in st.session_state.history]))
+        
         for fname in unique_files:
             base = os.path.splitext(fname)[0]
+            
             t_img = os.path.join(TEMP_DIR, f"{base}_annotated.jpg")
             t_csv = os.path.join(TEMP_DIR, f"{base}_data.csv")
+            
             if os.path.exists(t_img) and os.path.exists(t_csv):
                 z_img = f"{folder_struct}/{base}/{base}_annotated.jpg"
                 z_csv = f"{folder_struct}/{base}/{base}_data.csv"
+                
                 zf.write(t_img, z_img)
                 zf.write(t_csv, z_csv)
     
