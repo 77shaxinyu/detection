@@ -56,11 +56,11 @@ class SEAttention(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(channel // reduction, channel, bias=False),
             nn.Sigmoid())
-        def forward(self, x):
-            b, c, _, _ = x.size()
-            y = self.avg_pool(x).view(b, c)
-            y = self.fc(y).view(b, c, 1, 1)
-            return x * y.expand_as(x)
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
 
 class C2f_Custom(nn.Module):
     def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
@@ -80,7 +80,6 @@ class C2f_Custom(nn.Module):
         except:
             return self.attn(self.cv2(torch.cat(y, 1)))
 
-# Apply Injection
 block.C2f = C2f_Custom
 tasks.C2f = C2f_Custom
 setattr(block, 'CBAM', CBAM)
@@ -116,43 +115,20 @@ def get_component_type(class_name):
         return "Capacitor / 电容"
 
 def process_features(image, algorithm):
-    """
-    视觉增强版特征提取：
-    使用大号实心彩色圆点绘制特征，确保肉眼可见。
-    """
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    keypoints = []
-    
-    # 创建一个副本用于绘制，避免直接修改原图导致后续处理重叠混乱
     out_img = image.copy()
-    
-    if "SIFT" in algorithm:
+    if "Algorithm 1" in algorithm:
         try:
             sift = cv2.SIFT_create()
             keypoints, _ = sift.detectAndCompute(gray, None)
-            
-            # 手动绘制 SIFT 特征点：青色 (Cyan) 实心圆
-            # 颜色格式为 RGB: (0, 255, 255)
             for kp in keypoints:
-                x, y = int(kp.pt[0]), int(kp.pt[1])
-                cv2.circle(out_img, (x, y), 3, (0, 255, 255), -1)
-                
-        except Exception:
-            return image, 0
-            
-    elif "ORB" in algorithm:
-        orb = cv2.ORB_create(nfeatures=2000) # 增加点数上限以展示更多细节
+                cv2.circle(out_img, (int(kp.pt[0]), int(kp.pt[1])), 3, (0, 255, 255), -1)
+        except: return image, 0
+    elif "Algorithm 2" in algorithm:
+        orb = cv2.ORB_create(nfeatures=2000)
         keypoints, _ = orb.detectAndCompute(gray, None)
-        
-        # 手动绘制 ORB 特征点：品红 (Magenta) 实心圆
-        # 颜色格式为 RGB: (255, 0, 255)
         for kp in keypoints:
-            x, y = int(kp.pt[0]), int(kp.pt[1])
-            cv2.circle(out_img, (x, y), 3, (255, 0, 255), -1)
-            
-    else:
-        return image, 0
-        
+            cv2.circle(out_img, (int(kp.pt[0]), int(kp.pt[1])), 3, (255, 0, 255), -1)
     return out_img, len(keypoints)
 
 # ==========================================
@@ -160,183 +136,95 @@ def process_features(image, algorithm):
 # ==========================================
 st.set_page_config(page_title="PCB Detection System", layout="wide")
 
-# Sidebar
 with st.sidebar:
     st.header("Configuration / 配置")
-    
-    model_choice = st.selectbox(
-        "Select Model / 选择检测模型", 
-        ["Model 1", "Model 2"]
-    )
-    
-    # 这里的算法现在有了视觉效果
-    algo_choice = st.selectbox(
-        "Select Algorithm / 选择定位算法", 
-        ["Algorithm 1 (SIFT)", "Algorithm 2 (ORB)"]
-    )
-    
-    conf_thresh = st.slider(
-        "Confidence Threshold / 置信度阈值", 
-        0.1, 1.0, 0.25
-    )
-    
+    model_choice = st.selectbox("Select Model / 选择检测模型", ["Model 1", "Model 2"])
+    algo_choice = st.selectbox("Select Algorithm / 选择定位算法", ["Algorithm 1", "Algorithm 2"])
+    conf_thresh = st.slider("Confidence Threshold / 置信度阈值", 0.1, 1.0, 0.25)
     st.divider()
     if st.button("Clear Records / 清空记录"):
         st.session_state.history = []
-        if os.path.exists(TEMP_DIR):
-            shutil.rmtree(TEMP_DIR)
+        if os.path.exists(TEMP_DIR): shutil.rmtree(TEMP_DIR)
         os.makedirs(TEMP_DIR, exist_ok=True)
         st.rerun()
 
 st.title("PCB Detection System / PCB检测系统")
 
-# Load Model
 @st.cache_resource
 def load_pcb_model(choice):
-    if choice == "Model 1":
-        path = "models/best_se.pt"
-    else:
-        path = "models/best_cbam.pt"
-    
+    # 更新后的文件名路径
+    path = "models/se.pt" if choice == "Model 1" else "models/cbam.pt"
     if os.path.exists(path):
         return YOLO(path)
     return None
 
 model = load_pcb_model(model_choice)
+if "history" not in st.session_state: st.session_state.history = []
 
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-uploaded_files = st.file_uploader(
-    "Upload PCB Images / 上传图片 (支持批量)", 
-    type=["jpg", "jpeg", "png"], 
-    accept_multiple_files=True
-)
+uploaded_files = st.file_uploader("Upload PCB Images / 上传图片", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
 if uploaded_files:
     if model is None:
-        st.error("Model file not found. Please check 'models' folder in GitHub. / 未找到模型文件，请检查GitHub仓库。")
-        # 调试信息：显示当前工作目录和 models 文件夹内容
-        # st.write(f"Current Directory: {os.getcwd()}")
-        # if os.path.exists("models"):
-        #     st.write(f"Files in models: {os.listdir('models')}")
+        st.error("Model file not found in 'models/' folder. / 未在models文件夹中找到模型文件。")
     else:
         for file in uploaded_files:
             if not any(d['File'] == file.name for d in st.session_state.history):
-                
-                # 1. 解码图片
                 file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
                 img = cv2.imdecode(file_bytes, 1)
                 img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                img_feat, _ = process_features(img_rgb.copy(), algo_choice)
+                grid_img, ch, cw = draw_grid_9x9(img_feat)
                 
-                # 2. 运行特征提取算法 (SIFT/ORB) - 增强版
-                # 这会在 img_rgb 上画出非常明显的大圆点
-                img_with_features, kp_count = process_features(img_rgb.copy(), algo_choice)
-                
-                # 3. 在有特征点的图上画网格
-                grid_img, ch, cw = draw_grid_9x9(img_with_features)
-                
-                # 4. 运行 YOLO 检测 (预测原始图片)
-                results = model.predict(img, conf=conf_thresh, iou=0.5, agnostic_nms=True)
+                # 强化NMS去重逻辑
+                results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True)
                 
                 img_data_list = []
-                
                 for r in results:
                     for box in r.boxes:
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-                        
                         cls_name = model.names[int(box.cls[0])]
-                        conf_val = float(box.conf[0])
-                        
+                        pos = get_grid_pos((x1+x2)/2, (y1+y2)/2, ch, cw)
                         entry = {
                             "File": file.name,
                             "Type / 类型": get_component_type(cls_name),
                             "Class / 类别": cls_name,
-                            "Confidence / 置信度": f"{conf_val:.2f}",
-                            "Grid / 网格": get_grid_pos(cx, cy, ch, cw),
+                            "Confidence / 置信度": f"{float(box.conf[0]):.2f}",
+                            "Grid / 网格": pos,
                             "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})"
                         }
-                        
                         st.session_state.history.append(entry)
                         img_data_list.append(entry)
-                        
-                        # 5. 将检测框画在已经有特征点和网格的图上
                         cv2.rectangle(grid_img, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
-                        label_text = f"{cls_name} {entry['Grid / 网格']}"
-                        cv2.putText(grid_img, label_text, (int(x1), int(y1)-5),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-                
-                # 保存结果
-                file_base = os.path.splitext(file.name)[0]
-                save_img_path = os.path.join(TEMP_DIR, f"{file_base}_annotated.jpg")
-                cv2.imwrite(save_img_path, cv2.cvtColor(grid_img, cv2.COLOR_RGB2BGR))
-                
-                save_csv_path = os.path.join(TEMP_DIR, f"{file_base}_data.csv")
-                pd.DataFrame(img_data_list).to_csv(save_csv_path, index=False, encoding='utf-8-sig')
+                        cv2.putText(grid_img, f"{cls_name} {pos}", (int(x1), int(y1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
-        # 显示部分
+                file_base = os.path.splitext(file.name)[0]
+                cv2.imwrite(os.path.join(TEMP_DIR, f"{file_base}_annotated.jpg"), cv2.cvtColor(grid_img, cv2.COLOR_RGB2BGR))
+                pd.DataFrame(img_data_list).to_csv(os.path.join(TEMP_DIR, f"{file_base}_data.csv"), index=False, encoding='utf-8-sig')
+
         if st.session_state.history:
             st.divider()
-            
             df_all = pd.DataFrame(st.session_state.history)
-            last_file_name = uploaded_files[-1].name
-            df_curr = df_all[df_all["File"] == last_file_name]
-            
-            res_df = df_curr[df_curr["Type / 类型"].str.contains("Resistor")]
-            cap_df = df_curr[df_curr["Type / 类型"].str.contains("Capacitor")]
-            
-            res_comps = int(len(res_df) / 2)
-            cap_comps = int(len(cap_df) / 2)
-            total_comps = res_comps + cap_comps
-            
+            df_curr = df_all[df_all["File"] == uploaded_files[-1].name]
+            res_c = int(len(df_curr[df_curr["Type / 类型"].str.contains("Resistor")]) / 2)
+            cap_c = int(len(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")]) / 2)
             c1, c2, c3 = st.columns(3)
-            with c1:
-                st.info(f"Resistors / 电阻: {res_comps}")
-            with c2:
-                st.info(f"Capacitors / 电容: {cap_comps}")
-            with c3:
-                st.success(f"Total / 总计: {total_comps}")
+            c1.info(f"Resistors / 电阻: {res_c}")
+            c2.info(f"Capacitors / 电容: {cap_c}")
+            c3.success(f"Total / 总计: {res_c + cap_c}")
             
-            # --- 新增：显示特征提取信息 ---
-            st.caption(f"Algorithm Visuals: {algo_choice} points are marked in color.")
-            
-            file_base = os.path.splitext(last_file_name)[0]
-            temp_img_show_path = os.path.join(TEMP_DIR, f"{file_base}_annotated.jpg")
-            
-            if os.path.exists(temp_img_show_path):
-                show_img = cv2.imread(temp_img_show_path)
-                st.image(cv2.cvtColor(show_img, cv2.COLOR_BGR2RGB), 
-                         caption=f"Result: {last_file_name} (含 {algo_choice} 特征点)", use_column_width=True)
-            
+            f_base = os.path.splitext(uploaded_files[-1].name)[0]
+            st.image(cv2.cvtColor(cv2.imread(os.path.join(TEMP_DIR, f"{f_base}_annotated.jpg")), cv2.COLOR_BGR2RGB), use_column_width=True)
             st.dataframe(df_curr)
 
 if st.session_state.history:
     st.divider()
-    
-    m_name = sanitize_name(model_choice)
-    a_name = sanitize_name(algo_choice.split("(")[0].strip()) # Clean name
-    folder_struct = f"{m_name}_{a_name}"
-    
-    zip_buffer = io.BytesIO()
-    
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        unique_files = list(set([h['File'] for h in st.session_state.history]))
-        
-        for fname in unique_files:
-            base = os.path.splitext(fname)[0]
-            t_img = os.path.join(TEMP_DIR, f"{base}_annotated.jpg")
-            t_csv = os.path.join(TEMP_DIR, f"{base}_data.csv")
-            
-            if os.path.exists(t_img) and os.path.exists(t_csv):
-                z_img = f"{folder_struct}/{base}/{base}_annotated.jpg"
-                z_csv = f"{folder_struct}/{base}/{base}_data.csv"
-                zf.write(t_img, z_img)
-                zf.write(t_csv, z_csv)
-    
-    st.download_button(
-        label="Download All Results (ZIP) / 下载所有结果",
-        data=zip_buffer.getvalue(),
-        file_name=f"{folder_struct}_Results.zip",
-        mime="application/zip"
-    )
+    folder_struct = f"{sanitize_name(model_choice)}_{sanitize_name(algo_choice)}"
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        u_files = list(set([h['File'] for h in st.session_state.history]))
+        for f in u_files:
+            b = os.path.splitext(f)[0]
+            if os.path.exists(os.path.join(TEMP_DIR, f"{b}_annotated.jpg")):
+                zf.write(os.path.join(TEMP_DIR, f"{b}_annotated.jpg"), f"{folder_struct}/{b}/{b}_annotated.jpg")
+                zf.write(os.path.join(TEMP_DIR, f"{b}_data.csv"), f"{folder_struct}/{b}/{b}_data.csv")
+    st.download_button("Download Results (ZIP) / 下载所有结果", zip_buf.getvalue(), f"{folder_struct}_Results.zip", "application/zip")
