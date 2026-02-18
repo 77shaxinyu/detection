@@ -158,7 +158,7 @@ with st.sidebar:
     # 这里的算法现在有了视觉效果
     algo_choice = st.selectbox(
         "Select Algorithm / 选择定位算法", 
-        ["Algorithm 1 (SIFT)", "Algorithm 2 (ORB)"]
+        ["Algorithm 1 ", "Algorithm 2 "]
     )
     
     conf_thresh = st.slider(
