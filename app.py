@@ -172,7 +172,7 @@ with st.sidebar:
     # 这里的算法现在有了视觉效果
     algo_choice = st.selectbox(
         "Select Algorithm / 选择定位算法", 
-        ["Algorithm 1 ", "Algorithm 2 "]
+        ["Algorithm 1 (SIFT)", "Algorithm 2 (ORB)"]
     )
     
     conf_thresh = st.slider(
@@ -216,6 +216,10 @@ uploaded_files = st.file_uploader(
 if uploaded_files:
     if model is None:
         st.error("Model file not found. Please check 'models' folder in GitHub. / 未找到模型文件，请检查GitHub仓库。")
+        # 调试信息：显示当前工作目录和 models 文件夹内容
+        # st.write(f"Current Directory: {os.getcwd()}")
+        # if os.path.exists("models"):
+        #     st.write(f"Files in models: {os.listdir('models')}")
     else:
         for file in uploaded_files:
             if not any(d['File'] == file.name for d in st.session_state.history):
@@ -271,9 +275,6 @@ if uploaded_files:
                 save_csv_path = os.path.join(TEMP_DIR, f"{file_base}_data.csv")
                 pd.DataFrame(img_data_list).to_csv(save_csv_path, index=False, encoding='utf-8-sig')
 
-                # 保存特征点数量到 history (可选，如果想在表格里也看的话)
-                # 这里暂时不存入表格，只做显示用
-
         # 显示部分
         if st.session_state.history:
             st.divider()
@@ -298,10 +299,6 @@ if uploaded_files:
                 st.success(f"Total / 总计: {total_comps}")
             
             # --- 新增：显示特征提取信息 ---
-            # 由于 kp_count 是局部变量，我们需要重新获取一下最后一张图的特征点数用于显示
-            # 或者我们可以简单地再次调用一下处理函数（虽然有一点点性能损耗，但在 Streamlit 里最简单）
-            # 为了准确显示，我们可以在这里加一行文字说明当前算法
-            
             st.caption(f"Algorithm Visuals: {algo_choice} points are marked in color.")
             
             file_base = os.path.splitext(last_file_name)[0]
