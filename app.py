@@ -157,79 +157,105 @@ if uploaded_files:
         if proc_mode == "Fast Batch Scan (快速批量扫描)":
             st.info(f"Fast scanning images...")
             progress_bar = st.progress(0)
+            
+            # Temporary storage to prevent duplicates in current session run
+            current_scan_data = []
+            
             for idx, file in enumerate(uploaded_files):
-                if not any(d['File'] == file.name for d in st.session_state.history):
-                    file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
-                    img = cv2.imdecode(file_bytes, 1)
-                    h, w = img.shape[:2]
-                    results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True, verbose=False)
-                    for r in results:
-                        for box in r.boxes:
-                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                            cls = model.names[int(box.cls[0])]
-                            st.session_state.history.append({
-                                "File": file.name,
-                                "Type / 类型": get_component_type(cls),
-                                "Class / 类别": cls,
-                                "Confidence / 置信度": f"{float(box.conf[0]):.2f}",
-                                "Grid / 网格": get_grid_pos((x1+x2)/2, (y1+y2)/2, h/9, w/9),
-                                "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})"
-                            })
+                file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
+                img = cv2.imdecode(file_bytes, 1)
+                h, w = img.shape[:2]
+                
+                # Fast inference without image rendering
+                results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True, verbose=False)
+                
+                for r in results:
+                    for box in r.boxes:
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        cls = model.names[int(box.cls[0])]
+                        current_scan_data.append({
+                            "File": file.name,
+                            "Type / 类型": get_component_type(cls),
+                            "Class / 类别": cls,
+                            "Confidence / 置信度": f"{float(box.conf[0]):.2f}",
+                            "Grid / 网格": get_grid_pos((x1+x2)/2, (y1+y2)/2, h/9, w/9),
+                            "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})"
+                        })
                 progress_bar.progress((idx + 1) / len(uploaded_files))
-        
+            
+            # Append only new data to history
+            st.session_state.history.extend(current_scan_data)
+
+            if st.session_state.history:
+                st.divider()
+                df_all = pd.DataFrame(st.session_state.history)
+                st.subheader("Consolidated Defect Report / 缺陷汇总表格")
+                st.dataframe(df_all, use_container_width=True)
+
+                # ==========================================
+                # ZIP Export (Consolidated CSV Only)
+                # ==========================================
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                    # Convert total history to CSV
+                    csv_data = df_all.to_csv(index=False, encoding='utf-8-sig')
+                    zip_file.writestr("total_defects_report.csv", csv_data)
+                
+                st.download_button(
+                    label="Download Consolidated ZIP (CSV Report) / 导出汇总报告",
+                    data=zip_buffer.getvalue(),
+                    file_name=f"Batch_Scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                    mime="application/zip"
+                )
+
         else:
+            # Interactive Mode Logic (Remains unchanged for previewing)
             for file in uploaded_files:
                 file_base = os.path.splitext(file.name)[0]
                 target_path = os.path.join(TEMP_DIR, f"{file_base}_{model_choice}_annotated.jpg")
-                if not os.path.exists(target_path):
-                    file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
-                    img = cv2.imdecode(file_bytes, 1)
-                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    img_feat = process_features(img_rgb.copy(), algo_choice)
-                    grid_img, ch, cw = draw_grid_9x9(img_feat)
-                    results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True)
-                    img_data_list = []
-                    st.session_state.history = [d for d in st.session_state.history if d['File'] != file.name]
-                    for r in results:
-                        for box in r.boxes:
-                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                            cls = model.names[int(box.cls[0])]
-                            pos = get_grid_pos((x1+x2)/2, (y1+y2)/2, ch, cw)
-                            entry = {
-                                "File": file.name,
-                                "Type / 类型": get_component_type(cls),
-                                "Class / 类别": cls,
-                                "Confidence / 置信度": f"{float(box.conf[0]):.2f}",
-                                "Grid / 网格": pos,
-                                "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})"
-                            }
-                            st.session_state.history.append(entry)
-                            img_data_list.append(entry)
-                            cv2.rectangle(grid_img, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
-                            cv2.putText(grid_img, f"{cls} {pos}", (int(x1), int(y1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-                    cv2.imwrite(target_path, cv2.cvtColor(grid_img, cv2.COLOR_RGB2BGR))
-                    pd.DataFrame(img_data_list).to_csv(os.path.join(TEMP_DIR, f"{file_base}_data.csv"), index=False, encoding='utf-8-sig')
+                
+                file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
+                img = cv2.imdecode(file_bytes, 1)
+                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                img_feat = process_features(img_rgb.copy(), algo_choice)
+                grid_img, ch, cw = draw_grid_9x9(img_feat)
+                
+                results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True)
+                
+                # Clear previous history for this specific file to avoid duplicate entries on re-run
+                st.session_state.history = [d for d in st.session_state.history if d['File'] != file.name]
+                
+                img_data_list = []
+                for r in results:
+                    for box in r.boxes:
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        cls = model.names[int(box.cls[0])]
+                        pos = get_grid_pos((x1+x2)/2, (y1+y2)/2, ch, cw)
+                        entry = {
+                            "File": file.name,
+                            "Type / 类型": get_component_type(cls),
+                            "Class / 类别": cls,
+                            "Confidence / 置信度": f"{float(box.conf[0]):.2f}",
+                            "Grid / 网格": pos,
+                            "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})"
+                        }
+                        st.session_state.history.append(entry)
+                        img_data_list.append(entry)
+                        cv2.rectangle(grid_img, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
+                        cv2.putText(grid_img, f"{cls} {pos}", (int(x1), int(y1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                
+                cv2.imwrite(target_path, cv2.cvtColor(grid_img, cv2.COLOR_RGB2BGR))
 
-        if st.session_state.history:
-            st.divider()
-            df_all = pd.DataFrame(st.session_state.history)
-            if proc_mode == "Fast Batch Scan (快速批量扫描)":
-                st.dataframe(df_all)
-            else:
+            if st.session_state.history:
+                st.divider()
+                df_all = pd.DataFrame(st.session_state.history)
                 last_file_name = uploaded_files[-1].name
                 df_curr = df_all[df_all["File"] == last_file_name]
                 
-                # ==========================================
-                # 核心计数逻辑修改点 / Modified Counting Logic
-                # ==========================================
                 def get_physical_count(df_subset):
                     num_boxes = len(df_subset)
-                    if num_boxes == 0:
-                        return 0
-                    elif num_boxes == 1:
-                        return 1 # 1个框考虑到漏检，计数为1
-                    else:
-                        return int(num_boxes / 2) # 大于1个框，执行 框数/2 逻辑
+                    if num_boxes == 0: return 0
+                    return 1 if num_boxes == 1 else int(num_boxes / 2)
                 
                 res_c = get_physical_count(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
                 cap_c = get_physical_count(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
@@ -239,9 +265,8 @@ if uploaded_files:
                 c2.info(f"Capacitors / 电容: {cap_c}")
                 c3.success(f"Total / 总计: {res_c + cap_c}")
                 
-                # 显示图片与表格
                 f_base = os.path.splitext(last_file_name)[0]
                 display_path = os.path.join(TEMP_DIR, f"{f_base}_{model_choice}_annotated.jpg")
                 if os.path.exists(display_path):
                     st.image(cv2.cvtColor(cv2.imread(display_path), cv2.COLOR_BGR2RGB))
-                st.dataframe(df_curr)
+                st.dataframe(df_curr, use_container_width=True)
