@@ -120,6 +120,30 @@ def process_features(image, algorithm):
         for p in kp: cv2.circle(out_img, (int(p.pt[0]), int(p.pt[1])), 3, (255, 0, 255), -1)
     return out_img
 
+# --- 关键修改点：新增基于空间距离的聚类计数函数 ---
+def calculate_clustered_count(df_subset, dist_threshold=60):
+    if df_subset.empty: return 0
+    centers = []
+    for coord_str in df_subset["Coordinates / 坐标"]:
+        # 解析坐标字符串 "(x1,y1,x2,y2)"
+        c = [int(v) for v in coord_str.strip("()").split(",")]
+        centers.append([(c[0] + c[2]) / 2, (c[1] + c[3]) / 2])
+    
+    centers = np.array(centers)
+    n = len(centers)
+    visited = [False] * n
+    actual_count = 0
+    for i in range(n):
+        if not visited[i]:
+            actual_count += 1
+            visited[i] = True
+            for j in range(i + 1, n):
+                if not visited[j]:
+                    dist = np.linalg.norm(centers[i] - centers[j])
+                    if dist < dist_threshold:
+                        visited[j] = True
+    return actual_count
+
 # ==========================================
 # 4. Streamlit UI / 界面显示
 # ==========================================
@@ -234,8 +258,10 @@ if uploaded_files:
             else:
                 last_file_name = uploaded_files[-1].name
                 df_curr = df_all[df_all["File"] == last_file_name]
-                res_c = int(len(df_curr[df_curr["Type / 类型"].str.contains("Resistor")]) / 2)
-                cap_c = int(len(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")]) / 2)
+                
+                # --- 关键修改点：使用聚类逻辑进行物理计数 ---
+                res_c = calculate_clustered_count(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
+                cap_c = calculate_clustered_count(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
                 
                 c1, c2, c3 = st.columns(3)
                 c1.info(f"Resistors / 电阻: {res_c}")
