@@ -281,4 +281,4 @@ if st.session_state.history and proc_mode == "Interactive (交互预览)":
                 zf.write(csv_p, f"{folder_name}/{b}/{b}_data.csv")
     st.download_button("Download All Results (ZIP) / 下载所有结果", zip_buf.getvalue(), f"{folder_name}_Results.zip", "application/zip")
 
-这个代码是如何实现计数的？
+你看我这个代码，是ui设计对吗
