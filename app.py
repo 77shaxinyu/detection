@@ -120,30 +120,6 @@ def process_features(image, algorithm):
         for p in kp: cv2.circle(out_img, (int(p.pt[0]), int(p.pt[1])), 3, (255, 0, 255), -1)
     return out_img
 
-# --- 关键修改点：新增基于空间距离的聚类计数函数 ---
-def calculate_clustered_count(df_subset, dist_threshold=60):
-    if df_subset.empty: return 0
-    centers = []
-    for coord_str in df_subset["Coordinates / 坐标"]:
-        # 解析坐标字符串 "(x1,y1,x2,y2)"
-        c = [int(v) for v in coord_str.strip("()").split(",")]
-        centers.append([(c[0] + c[2]) / 2, (c[1] + c[3]) / 2])
-    
-    centers = np.array(centers)
-    n = len(centers)
-    visited = [False] * n
-    actual_count = 0
-    for i in range(n):
-        if not visited[i]:
-            actual_count += 1
-            visited[i] = True
-            for j in range(i + 1, n):
-                if not visited[j]:
-                    dist = np.linalg.norm(centers[i] - centers[j])
-                    if dist < dist_threshold:
-                        visited[j] = True
-    return actual_count
-
 # ==========================================
 # 4. Streamlit UI / 界面显示
 # ==========================================
@@ -179,16 +155,14 @@ if uploaded_files:
         st.error("Model not found in models/ folder.")
     else:
         if proc_mode == "Fast Batch Scan (快速批量扫描)":
-            st.info(f"Fast scanning {len(uploaded_files)} images... / 正在快速扫描并汇总...")
+            st.info(f"Fast scanning images...")
             progress_bar = st.progress(0)
-            
             for idx, file in enumerate(uploaded_files):
                 if not any(d['File'] == file.name for d in st.session_state.history):
                     file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
                     img = cv2.imdecode(file_bytes, 1)
                     h, w = img.shape[:2]
                     results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True, verbose=False)
-                    
                     for r in results:
                         for box in r.boxes:
                             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
@@ -202,24 +176,20 @@ if uploaded_files:
                                 "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})"
                             })
                 progress_bar.progress((idx + 1) / len(uploaded_files))
-            st.success("Batch Scan Complete! / 快速扫描完成！")
         
         else:
             for file in uploaded_files:
                 file_base = os.path.splitext(file.name)[0]
                 target_path = os.path.join(TEMP_DIR, f"{file_base}_{model_choice}_annotated.jpg")
-                
                 if not os.path.exists(target_path):
                     file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
                     img = cv2.imdecode(file_bytes, 1)
                     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                     img_feat = process_features(img_rgb.copy(), algo_choice)
                     grid_img, ch, cw = draw_grid_9x9(img_feat)
-                    
                     results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True)
                     img_data_list = []
                     st.session_state.history = [d for d in st.session_state.history if d['File'] != file.name]
-                    
                     for r in results:
                         for box in r.boxes:
                             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
@@ -237,56 +207,41 @@ if uploaded_files:
                             img_data_list.append(entry)
                             cv2.rectangle(grid_img, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
                             cv2.putText(grid_img, f"{cls} {pos}", (int(x1), int(y1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-                    
                     cv2.imwrite(target_path, cv2.cvtColor(grid_img, cv2.COLOR_RGB2BGR))
                     pd.DataFrame(img_data_list).to_csv(os.path.join(TEMP_DIR, f"{file_base}_data.csv"), index=False, encoding='utf-8-sig')
 
         if st.session_state.history:
             st.divider()
             df_all = pd.DataFrame(st.session_state.history)
-            
             if proc_mode == "Fast Batch Scan (快速批量扫描)":
-                st.subheader("Summary Table / 检测结果总表")
-                st.dataframe(df_all, use_container_width=True)
-                sum_csv = df_all.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-                st.download_button(
-                    label="Download Consolidated Report / 下载汇总报表",
-                    data=sum_csv,
-                    file_name=f"Batch_Scan_{model_choice}_Report.csv",
-                    mime="text/csv"
-                )
+                st.dataframe(df_all)
             else:
                 last_file_name = uploaded_files[-1].name
                 df_curr = df_all[df_all["File"] == last_file_name]
                 
-                # --- 关键修改点：使用聚类逻辑进行物理计数 ---
-                res_c = calculate_clustered_count(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
-                cap_c = calculate_clustered_count(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
+                # ==========================================
+                # 核心计数逻辑修改点 / Modified Counting Logic
+                # ==========================================
+                def get_physical_count(df_subset):
+                    num_boxes = len(df_subset)
+                    if num_boxes == 0:
+                        return 0
+                    elif num_boxes == 1:
+                        return 1 # 1个框考虑到漏检，计数为1
+                    else:
+                        return int(num_boxes / 2) # 大于1个框，执行 框数/2 逻辑
+                
+                res_c = get_physical_count(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
+                cap_c = get_physical_count(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
                 
                 c1, c2, c3 = st.columns(3)
                 c1.info(f"Resistors / 电阻: {res_c}")
                 c2.info(f"Capacitors / 电容: {cap_c}")
                 c3.success(f"Total / 总计: {res_c + cap_c}")
                 
+                # 显示图片与表格
                 f_base = os.path.splitext(last_file_name)[0]
                 display_path = os.path.join(TEMP_DIR, f"{f_base}_{model_choice}_annotated.jpg")
                 if os.path.exists(display_path):
-                    img_to_show = cv2.imread(display_path)
-                    if img_to_show is not None:
-                        st.image(cv2.cvtColor(img_to_show, cv2.COLOR_BGR2RGB), use_container_width=True)
+                    st.image(cv2.cvtColor(cv2.imread(display_path), cv2.COLOR_BGR2RGB))
                 st.dataframe(df_curr)
-
-if st.session_state.history and proc_mode == "Interactive (交互预览)":
-    st.divider()
-    folder_name = f"{model_choice}_{algo_choice.strip()}"
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        u_files = list(set([h['File'] for h in st.session_state.history]))
-        for f in u_files:
-            b = os.path.splitext(f)[0]
-            img_p = os.path.join(TEMP_DIR, f"{b}_{model_choice}_annotated.jpg")
-            csv_p = os.path.join(TEMP_DIR, f"{b}_data.csv")
-            if os.path.exists(img_p):
-                zf.write(img_p, f"{folder_name}/{b}/{b}_annotated.jpg")
-                zf.write(csv_p, f"{folder_name}/{b}/{b}_data.csv")
-    st.download_button("Download All Results (ZIP) / 下载所有结果", zip_buf.getvalue(), f"{folder_name}_Results.zip", "application/zip")
