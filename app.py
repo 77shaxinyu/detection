@@ -238,62 +238,55 @@ if uploaded_files:
                 last_file_name = uploaded_files[-1].name
                 df_curr = df_all[df_all["File"] == last_file_name]
                 
-                # ==========================================
-                # 重新优化的物理聚类去重逻辑（核心修改点）
-                # ==========================================
+                # ==========================================================
+                # 物理组件聚类计数逻辑 / Physical Component Clustering Logic
+                # ==========================================================
                 def get_physical_count(df_subset):
                     if df_subset.empty: return 0
                     
-                    # 1. 坐标解析
-                    boxes = []
+                    # 1. 解析当前子集中的所有坐标
+                    centers = []
                     for c_str in df_subset["Coordinates / 坐标"]:
                         try:
                             v = [int(x) for x in c_str.replace('(','').replace(')','').split(',')]
-                            boxes.append(v)
+                            centers.append(((v[0]+v[2])/2, (v[1]+v[3])/2)) # 提取中心点 (cx, cy)
                         except: continue
-                    if not boxes: return 0
+                    if not centers: return 0
 
-                    # 2. 参数设定：最大允许合并距离（单位：像素）
-                    # 针对斜视 V3 视角，120 像素能较好覆盖同一个电阻的左右焊点间距
-                    MAX_MERGE_DIST = 120 
+                    # 2. 核心算法：基于直线距离的连通域聚类
+                    # MAX_COMPONENT_GAP: 定义同一个组件两个焊点的最大跨度
+                    # 针对斜视 V3 视角，130 像素能稳健地将同一元件的框“粘”在一起
+                    MAX_COMPONENT_GAP = 135 
                     
-                    centers = [((b[0]+b[2])/2, (b[1]+b[3])/2) for b in boxes]
-                    used = [False] * len(centers)
-                    final_count = 0
-                    
-                    # 从左往右进行匹配扫描
-                    sorted_indices = sorted(range(len(centers)), key=lambda k: centers[k][0])
-                    
-                    for i in range(len(sorted_indices)):
-                        idx_i = sorted_indices[i]
-                        if used[idx_i]: continue
+                    n = len(centers)
+                    visited = [False] * n
+                    component_count = 0
+
+                    for i in range(n):
+                        if visited[i]: continue
                         
-                        # 发现新电阻
-                        final_count += 1
-                        used[idx_i] = True
-                        c1 = centers[idx_i]
+                        # 只要发现一个没被处理过的框，就代表发现了一个新的物理组件
+                        component_count += 1
                         
-                        # 寻找最近的“另一半”焊点
-                        best_match = -1
-                        min_dist = MAX_MERGE_DIST
-                        
-                        for j in range(i + 1, len(sorted_indices)):
-                            idx_j = sorted_indices[j]
-                            if used[idx_j]: continue
-                            c2 = centers[idx_j]
+                        # 使用 BFS 找出该物理组件下的所有框（焊点）
+                        queue = [i]
+                        visited[i] = True
+                        while queue:
+                            curr_idx = queue.pop(0)
+                            c1 = centers[curr_idx]
                             
-                            # 欧几里得距离计算
-                            d = math.sqrt((c1[0]-c2[0])**2 + (c1[1]-c2[1])**2)
-                            
-                            if d < min_dist:
-                                min_dist = d
-                                best_match = idx_j
-                        
-                        # 如果匹配成功，标记该焊点已被消耗
-                        if best_match != -1:
-                            used[best_match] = True
-                            
-                    return final_count
+                            for next_idx in range(n):
+                                if not visited[next_idx]:
+                                    c2 = centers[next_idx]
+                                    # 计算真实直线距离（勾股定理）
+                                    dist = math.sqrt((c1[0]-c2[0])**2 + (c1[1]-c2[1])**2)
+                                    
+                                    # 如果距离足够近，认为这些框属于同一个物理实体
+                                    if dist < MAX_COMPONENT_GAP:
+                                        visited[next_idx] = True
+                                        queue.append(next_idx)
+                                        
+                    return component_count
                 
                 res_c = get_physical_count(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
                 cap_c = get_physical_count(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
