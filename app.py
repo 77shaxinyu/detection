@@ -9,6 +9,7 @@ import shutil
 import io
 import torch
 import torch.nn as nn
+import math  # 新增：用于处理斜视视角的三角函数计算
 from datetime import datetime
 from ultralytics import YOLO
 import ultralytics.nn.tasks as tasks
@@ -252,10 +253,45 @@ if uploaded_files:
                 last_file_name = uploaded_files[-1].name
                 df_curr = df_all[df_all["File"] == last_file_name]
                 
+                # ==========================================
+                # 修改点：针对斜视视角优化的几何聚类计数逻辑
+                # ==========================================
                 def get_physical_count(df_subset):
-                    num_boxes = len(df_subset)
-                    if num_boxes == 0: return 0
-                    return 1 if num_boxes == 1 else int(num_boxes / 2)
+                    if df_subset.empty: return 0
+                    boxes = []
+                    for c_str in df_subset["Coordinates / 坐标"]:
+                        try:
+                            v = [int(x) for x in c_str.replace('(','').replace(')','').split(',')]
+                            boxes.append(v)
+                        except: continue
+                    if not boxes: return 0
+
+                    MAX_DIST = 95   # 两个焊点间的最大直线像素距离 (适配 V3 视角)
+                    MAX_ANGLE = 40  # 允许的最大连线偏转角度 (防止误合并上下相邻电阻)
+                    
+                    final_count = 0
+                    used = [False] * len(boxes)
+                    centers = [((b[0]+b[2])/2, (b[1]+b[3])/2) for b in boxes]
+                    # 按X轴排序后从左往右扫描匹配
+                    sorted_idx = sorted(range(len(centers)), key=lambda k: centers[k][0])
+
+                    for i in range(len(sorted_idx)):
+                        idx_i = sorted_idx[i]
+                        if used[idx_i]: continue
+                        final_count += 1
+                        used[idx_i] = True
+                        c1 = centers[idx_i]
+                        for j in range(i + 1, len(sorted_idx)):
+                            idx_j = sorted_idx[j]
+                            if used[idx_j]: continue
+                            c2 = centers[idx_j]
+                            dx, dy = c2[0] - c1[0], c2[1] - c1[1]
+                            dist = math.sqrt(dx**2 + dy**2)
+                            angle = abs(math.degrees(math.atan2(dy, dx)))
+                            if dist < MAX_DIST and angle < MAX_ANGLE:
+                                used[idx_j] = True
+                                break
+                    return final_count
                 
                 res_c = get_physical_count(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
                 cap_c = get_physical_count(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
