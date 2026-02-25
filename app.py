@@ -239,10 +239,12 @@ if uploaded_files:
                 df_curr = df_all[df_all["File"] == last_file_name]
                 
                 # ==========================================
-                # 重新优化的去重计数逻辑（针对斜视视角增强）
+                # 重新优化的物理聚类去重逻辑（核心修改点）
                 # ==========================================
                 def get_physical_count(df_subset):
                     if df_subset.empty: return 0
+                    
+                    # 1. 坐标解析
                     boxes = []
                     for c_str in df_subset["Coordinates / 坐标"]:
                         try:
@@ -251,34 +253,45 @@ if uploaded_files:
                         except: continue
                     if not boxes: return 0
 
-                    # 关键参数：对于640x640图片，电阻左右焊点间距约为 60-120 像素
-                    MAX_MATCH_DIST = 115 
+                    # 2. 参数设定：最大允许合并距离（单位：像素）
+                    # 针对斜视 V3 视角，120 像素能较好覆盖同一个电阻的左右焊点间距
+                    MAX_MERGE_DIST = 120 
                     
-                    final_count = 0
-                    used = [False] * len(boxes)
                     centers = [((b[0]+b[2])/2, (b[1]+b[3])/2) for b in boxes]
+                    used = [False] * len(centers)
+                    final_count = 0
                     
-                    for i in range(len(boxes)):
-                        if used[i]: continue
+                    # 从左往右进行匹配扫描
+                    sorted_indices = sorted(range(len(centers)), key=lambda k: centers[k][0])
+                    
+                    for i in range(len(sorted_indices)):
+                        idx_i = sorted_indices[i]
+                        if used[idx_i]: continue
                         
+                        # 发现新电阻
                         final_count += 1
-                        used[i] = True
-                        c1 = centers[i]
+                        used[idx_i] = True
+                        c1 = centers[idx_i]
                         
-                        # 寻找最近的且在距离阈值内的邻居
-                        min_d = float('inf')
-                        match_idx = -1
-                        for j in range(len(boxes)):
-                            if i == j or used[j]: continue
-                            c2 = centers[j]
+                        # 寻找最近的“另一半”焊点
+                        best_match = -1
+                        min_dist = MAX_MERGE_DIST
+                        
+                        for j in range(i + 1, len(sorted_indices)):
+                            idx_j = sorted_indices[j]
+                            if used[idx_j]: continue
+                            c2 = centers[idx_j]
+                            
+                            # 欧几里得距离计算
                             d = math.sqrt((c1[0]-c2[0])**2 + (c1[1]-c2[1])**2)
-                            if d < min_d:
-                                min_d = d
-                                match_idx = j
+                            
+                            if d < min_dist:
+                                min_dist = d
+                                best_match = idx_j
                         
-                        # 如果找到合适的配对焊点，则合并
-                        if match_idx != -1 and min_d < MAX_MATCH_DIST:
-                            used[match_idx] = True
+                        # 如果匹配成功，标记该焊点已被消耗
+                        if best_match != -1:
+                            used[best_match] = True
                             
                     return final_count
                 
