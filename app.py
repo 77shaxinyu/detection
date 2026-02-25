@@ -9,7 +9,7 @@ import shutil
 import io
 import torch
 import torch.nn as nn
-import math  # 新增：用于处理斜视视角的三角函数计算
+import math
 from datetime import datetime
 from ultralytics import YOLO
 import ultralytics.nn.tasks as tasks
@@ -158,16 +158,12 @@ if uploaded_files:
         if proc_mode == "Fast Batch Scan (快速批量扫描)":
             st.info(f"Fast scanning images...")
             progress_bar = st.progress(0)
-            
-            # Temporary storage to prevent duplicates in current session run
             current_scan_data = []
             
             for idx, file in enumerate(uploaded_files):
                 file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
                 img = cv2.imdecode(file_bytes, 1)
                 h, w = img.shape[:2]
-                
-                # Fast inference without image rendering
                 results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True, verbose=False)
                 
                 for r in results:
@@ -184,7 +180,6 @@ if uploaded_files:
                         })
                 progress_bar.progress((idx + 1) / len(uploaded_files))
             
-            # Append only new data to history
             st.session_state.history.extend(current_scan_data)
 
             if st.session_state.history:
@@ -193,12 +188,8 @@ if uploaded_files:
                 st.subheader("Consolidated Defect Report / 缺陷汇总表格")
                 st.dataframe(df_all, use_container_width=True)
 
-                # ==========================================
-                # ZIP Export (Consolidated CSV Only)
-                # ==========================================
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                    # Convert total history to CSV
                     csv_data = df_all.to_csv(index=False, encoding='utf-8-sig')
                     zip_file.writestr("total_defects_report.csv", csv_data)
                 
@@ -210,11 +201,9 @@ if uploaded_files:
                 )
 
         else:
-            # Interactive Mode Logic (Remains unchanged for previewing)
             for file in uploaded_files:
                 file_base = os.path.splitext(file.name)[0]
                 target_path = os.path.join(TEMP_DIR, f"{file_base}_{model_choice}_annotated.jpg")
-                
                 file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
                 img = cv2.imdecode(file_bytes, 1)
                 img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -222,11 +211,8 @@ if uploaded_files:
                 grid_img, ch, cw = draw_grid_9x9(img_feat)
                 
                 results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True)
-                
-                # Clear previous history for this specific file to avoid duplicate entries on re-run
                 st.session_state.history = [d for d in st.session_state.history if d['File'] != file.name]
                 
-                img_data_list = []
                 for r in results:
                     for box in r.boxes:
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
@@ -241,9 +227,8 @@ if uploaded_files:
                             "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})"
                         }
                         st.session_state.history.append(entry)
-                        img_data_list.append(entry)
                         cv2.rectangle(grid_img, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
-                        cv2.putText(grid_img, f"{cls} {pos}", (int(x1), int(y1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                        cv2.putText(grid_img, f"{cls}", (int(x1), int(y1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
                 
                 cv2.imwrite(target_path, cv2.cvtColor(grid_img, cv2.COLOR_RGB2BGR))
 
@@ -254,7 +239,7 @@ if uploaded_files:
                 df_curr = df_all[df_all["File"] == last_file_name]
                 
                 # ==========================================
-                # 修改点：针对斜视视角优化的几何聚类计数逻辑
+                # 重新优化的去重计数逻辑（针对斜视视角增强）
                 # ==========================================
                 def get_physical_count(df_subset):
                     if df_subset.empty: return 0
@@ -266,31 +251,35 @@ if uploaded_files:
                         except: continue
                     if not boxes: return 0
 
-                    MAX_DIST = 95   # 两个焊点间的最大直线像素距离 (适配 V3 视角)
-                    MAX_ANGLE = 40  # 允许的最大连线偏转角度 (防止误合并上下相邻电阻)
+                    # 关键参数：对于640x640图片，电阻左右焊点间距约为 60-120 像素
+                    MAX_MATCH_DIST = 115 
                     
                     final_count = 0
                     used = [False] * len(boxes)
                     centers = [((b[0]+b[2])/2, (b[1]+b[3])/2) for b in boxes]
-                    # 按X轴排序后从左往右扫描匹配
-                    sorted_idx = sorted(range(len(centers)), key=lambda k: centers[k][0])
-
-                    for i in range(len(sorted_idx)):
-                        idx_i = sorted_idx[i]
-                        if used[idx_i]: continue
+                    
+                    for i in range(len(boxes)):
+                        if used[i]: continue
+                        
                         final_count += 1
-                        used[idx_i] = True
-                        c1 = centers[idx_i]
-                        for j in range(i + 1, len(sorted_idx)):
-                            idx_j = sorted_idx[j]
-                            if used[idx_j]: continue
-                            c2 = centers[idx_j]
-                            dx, dy = c2[0] - c1[0], c2[1] - c1[1]
-                            dist = math.sqrt(dx**2 + dy**2)
-                            angle = abs(math.degrees(math.atan2(dy, dx)))
-                            if dist < MAX_DIST and angle < MAX_ANGLE:
-                                used[idx_j] = True
-                                break
+                        used[i] = True
+                        c1 = centers[i]
+                        
+                        # 寻找最近的且在距离阈值内的邻居
+                        min_d = float('inf')
+                        match_idx = -1
+                        for j in range(len(boxes)):
+                            if i == j or used[j]: continue
+                            c2 = centers[j]
+                            d = math.sqrt((c1[0]-c2[0])**2 + (c1[1]-c2[1])**2)
+                            if d < min_d:
+                                min_d = d
+                                match_idx = j
+                        
+                        # 如果找到合适的配对焊点，则合并
+                        if match_idx != -1 and min_d < MAX_MATCH_DIST:
+                            used[match_idx] = True
+                            
                     return final_count
                 
                 res_c = get_physical_count(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
