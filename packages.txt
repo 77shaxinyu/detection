@@ -1,2 +1,5 @@
+# 替换libglib2.0-0为兼容版本，保留libgl1
 libgl1
-libglib2.0-0
+libglib2.0-0/trixie
+libffi8
+libpcre2-8-0
