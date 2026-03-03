@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-# 直接把你之前在 block.py 里写的两个类复制过来即可
+
 class SEAttention(nn.Module):
     def __init__(self, channel, reduction=16):
         super().__init__()
