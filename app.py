@@ -257,7 +257,7 @@ if uploaded_files:
                         st.session_state.history.append(entry)
                         img_data_list.append(entry)
                         cv2.rectangle(grid_img, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
-                        cv2.putText(grid_img, f"{cls} {pos}", (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        cv2.putText(grid_img, f"{cls} {pos}", (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 1,
                                     (255, 255, 0), 1)
 
                 cv2.imwrite(target_path, cv2.cvtColor(grid_img, cv2.COLOR_RGB2BGR))
