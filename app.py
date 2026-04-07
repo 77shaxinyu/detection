@@ -16,82 +16,16 @@ import ultralytics.nn.modules.block as block
 from ultralytics.nn.modules.conv import Conv
 
 # ==========================================
-# 1. System Initialization & CSS Black Theme
-# 系统初始化与全界面黑化样式 (深度适配表格与上传组件)
+# 1. System Initialization
 # ==========================================
 st.set_page_config(page_title="PCB Detection System", layout="wide")
-
-# 注入增强版 CSS 实现全界面深度黑化 [cite: 322, 331]
-st.markdown("""
-    <style>
-    /* 1. 全局与主背景黑色 */
-    .stApp, [data-testid="stAppViewContainer"] {
-        background-color: #0E1117 !important;
-        color: #FFFFFF !important;
-    }
-
-    /* 2. 侧边栏背景深色 */
-    [data-testid="stSidebar"] {
-        background-color: #161B22 !important;
-        border-right: 1px solid #30363d;
-    }
-
-    /* 3. 强制所有文本颜色为白色 */
-    h1, h2, h3, h4, h5, h6, p, span, label, .stMarkdown, .stDataFrame {
-        color: #FFFFFF !important;
-    }
-
-    /* 4. 彻底黑化上传组件区域 [针对 image_5166bc.jpg] */
-    [data-testid="stFileUploadDropzone"] {
-        background-color: #161B22 !important;
-        border: 1px dashed #30363d !important;
-    }
-    /* 上传框内部文字 */
-    [data-testid="stFileUploadDropzone"] div div span {
-        color: #FFFFFF !important;
-    }
-
-    /* 5. 针对数据表格 st.dataframe 的深度黑化 */
-    /* 强制表格背景、边框和文字颜色 */
-    [data-testid="stDataFrame"] {
-        background-color: #161B22 !important;
-    }
-    /* 覆盖表格内部所有单元格和标题的背景 */
-    div[data-testid="stDataFrame"] div[role="gridcell"],
-    div[data-testid="stDataFrame"] div[role="columnheader"],
-    div[data-testid="stDataFrame"] div[role="rowheader"] {
-        background-color: #161B22 !important;
-        color: #FFFFFF !important;
-        border: 1px solid #30363d !important;
-    }
-
-    /* 6. 按钮、下拉框与交互组件 */
-    .stButton>button {
-        background-color: #21262d !important;
-        color: white !important;
-        border: 1px solid #30363d !important;
-        width: 100%;
-    }
-    div[data-baseweb="select"] > div {
-        background-color: #161B22 !important;
-        color: white !important;
-    }
-    /* 统计看板 (Info/Success) 背景加深 */
-    .stAlert {
-        background-color: #161B22 !important;
-        color: white !important;
-        border: 1px solid #30363d !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
 
 TEMP_DIR = "temp_results"
 if not os.path.exists(TEMP_DIR):
     os.makedirs(TEMP_DIR, exist_ok=True)
 
-
 # ==========================================
-# 2. Custom Modules Injection / 模块注入 [cite: 93, 345-348]
+# 2. Custom Modules Injection [cite: 7, 168, 259-264]
 # ==========================================
 class CBAM(nn.Module):
     def __init__(self, c1, ratio=16, kernel_size=7):
@@ -150,7 +84,6 @@ class C2f_Custom(nn.Module):
         except:
             return self.attn(self.cv2(torch.cat(y, 1)))
 
-# 运行时模块注入 [cite: 348-350]
 block.C2f = C2f_Custom
 tasks.C2f = C2f_Custom
 setattr(block, 'CBAM', CBAM)
@@ -158,9 +91,8 @@ setattr(tasks, 'CBAM', CBAM)
 setattr(block, 'SEAttention', SEAttention)
 setattr(tasks, 'SEAttention', SEAttention)
 
-
 # ==========================================
-# 3. Helper Functions / 工具函数 [cite: 341-343]
+# 3. Helper Functions
 # ==========================================
 def draw_grid_9x9(image):
     h, w = image.shape[:2]
@@ -183,19 +115,18 @@ def get_component_type(class_name):
 def process_features(image, algorithm):
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     out_img = image.copy()
-    if "Algorithm 1" in algorithm:  # SIFT [cite: 138, 150-160]
+    if "Algorithm 1" in algorithm:
         sift = cv2.SIFT_create()
         kp, _ = sift.detectAndCompute(gray, None)
         for p in kp: cv2.circle(out_img, (int(p.pt[0]), int(p.pt[1])), 3, (0, 255, 255), -1)
-    else:  # ORB [cite: 167, 175-178]
+    else:
         orb = cv2.ORB_create(nfeatures=2000)
         kp, _ = orb.detectAndCompute(gray, None)
         for p in kp: cv2.circle(out_img, (int(p.pt[0]), int(p.pt[1])), 3, (255, 0, 255), -1)
     return out_img
 
-
 # ==========================================
-# 4. UI Main Logic / 界面主逻辑
+# 4. Main Logic
 # ==========================================
 with st.sidebar:
     st.header("Configuration / 配置")
@@ -220,7 +151,7 @@ model = load_pcb_model(model_choice)
 if "history" not in st.session_state:
     st.session_state.history = []
 
-st.title("PCB Defect Detection & Analysis System")
+st.title("PCB Defect Detection System")
 uploaded_files = st.file_uploader("Upload PCB Images / 上传图片", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
 if uploaded_files:
@@ -257,7 +188,7 @@ if uploaded_files:
                 st.divider()
                 df_all = pd.DataFrame(st.session_state.history)
                 st.subheader("Consolidated Defect Report / 缺陷汇总表格")
-                st.dataframe(df_all, use_container_width=True) # 表格黑化已由 CSS 强制覆盖
+                st.dataframe(df_all, use_container_width=True)
 
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
@@ -271,34 +202,29 @@ if uploaded_files:
                     mime="application/zip"
                 )
 
-        else: # Interactive Preview Mode [cite: 340-344]
+        else:
             for file in uploaded_files:
                 file_base = os.path.splitext(file.name)[0]
                 target_path = os.path.join(TEMP_DIR, f"{file_base}_{model_choice}_annotated.jpg")
-
                 file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
                 img = cv2.imdecode(file_bytes, 1)
                 img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 img_feat = process_features(img_rgb.copy(), algo_choice)
                 grid_img, ch, cw = draw_grid_9x9(img_feat)
-
                 results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True)
                 st.session_state.history = [d for d in st.session_state.history if d['File'] != file.name]
-
                 for r in results:
                     for box in r.boxes:
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                         cls = model.names[int(box.cls[0])]
                         pos = get_grid_pos((x1 + x2) / 2, (y1 + y2) / 2, ch, cw)
-                        entry = {
+                        st.session_state.history.append({
                             "File": file.name, "Type / 类型": get_component_type(cls),
                             "Class / 类别": cls, "Confidence / 置信度": f"{float(box.conf[0]):.2f}",
                             "Grid / 网格": pos, "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})"
-                        }
-                        st.session_state.history.append(entry)
+                        })
                         cv2.rectangle(grid_img, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
                         cv2.putText(grid_img, f"{cls} {pos}", (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-
                 cv2.imwrite(target_path, cv2.cvtColor(grid_img, cv2.COLOR_RGB2BGR))
 
             if st.session_state.history:
@@ -306,23 +232,16 @@ if uploaded_files:
                 df_all = pd.DataFrame(st.session_state.history)
                 last_file_name = uploaded_files[-1].name
                 df_curr = df_all[df_all["File"] == last_file_name]
-
-                # 物理计数算法
                 def get_physical_count(df_subset):
                     num_boxes = len(df_subset)
-                    if num_boxes == 0: return 0
-                    return 1 if num_boxes == 1 else int(num_boxes / 2)
-
+                    return 1 if num_boxes == 1 else int(num_boxes / 2) if num_boxes > 1 else 0
                 res_c = get_physical_count(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
                 cap_c = get_physical_count(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
-
                 c1, c2, c3 = st.columns(3)
                 c1.info(f"Resistors / 电阻: {res_c}")
                 c2.info(f"Capacitors / 电容: {cap_c}")
                 c3.success(f"Total / 总计: {res_c + cap_c}")
-
-                f_base = os.path.splitext(last_file_name)[0]
-                display_path = os.path.join(TEMP_DIR, f"{f_base}_{model_choice}_annotated.jpg")
+                display_path = os.path.join(TEMP_DIR, f"{os.path.splitext(last_file_name)[0]}_{model_choice}_annotated.jpg")
                 if os.path.exists(display_path):
                     st.image(cv2.cvtColor(cv2.imread(display_path), cv2.COLOR_BGR2RGB))
                 st.dataframe(df_curr, use_container_width=True)
