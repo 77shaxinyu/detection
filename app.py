@@ -137,6 +137,45 @@ def process_features(image, algorithm):
 # ==========================================
 st.set_page_config(page_title="PCB Detection System", layout="wide")
 
+# 注入 CSS 实现黑底白字 [cite: 322, 331]
+st.markdown("""
+    <style>
+    /* 主背景色为黑/深灰 */
+    .stApp {
+        background-color: #0E1117;
+        color: #FFFFFF;
+    }
+    /* 侧边栏背景 */
+    [data-testid="stSidebar"] {
+        background-color: #161B22;
+        border-right: 1px solid #30363d;
+    }
+    /* 强制文本、标题、标签为白色 */
+    h1, h2, h3, h4, h5, h6, p, span, label, .stMarkdown {
+        color: #FFFFFF !important;
+    }
+    /* 数据表格背景适配 */
+    .stDataFrame {
+        background-color: #161B22;
+    }
+    /* 按钮样式微调 */
+    .stButton>button {
+        background-color: #21262d;
+        color: white;
+        border: 1px solid #30363d;
+    }
+    .stButton>button:hover {
+        border-color: #8b949e;
+        color: #58a6ff;
+    }
+    /* 下拉框与输入框 */
+    div[data-baseweb="select"] > div {
+        background-color: #0E1117 !important;
+        color: white !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 with st.sidebar:
     st.header("Configuration / 配置")
     proc_mode = st.radio("Processing Mode / 处理模式", ["Interactive (交互预览)", "Fast Batch Scan (快速批量扫描)"])
@@ -257,8 +296,8 @@ if uploaded_files:
                         st.session_state.history.append(entry)
                         img_data_list.append(entry)
                         cv2.rectangle(grid_img, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
-                        cv2.putText(grid_img, f"{cls} {pos}", (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 2,
-                                    (255, 255, 0), 2)
+                        cv2.putText(grid_img, f"{cls} {pos}", (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                    (255, 255, 0), 1)
 
                 cv2.imwrite(target_path, cv2.cvtColor(grid_img, cv2.COLOR_RGB2BGR))
 
