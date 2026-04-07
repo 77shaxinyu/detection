@@ -227,7 +227,7 @@ if uploaded_files:
     if model is None:
         st.error("Model not found in models/ folder.")
     else:
-        if proc_mode == "Fast Batch Scan (快速批量扫描)": [cite: 333-335]
+        if proc_mode == "Fast Batch Scan (快速批量扫描)":
             st.info(f"Fast scanning images...")
             progress_bar = st.progress(0)
             current_scan_data = []
