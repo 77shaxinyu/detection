@@ -17,80 +17,70 @@ from ultralytics.nn.modules.conv import Conv
 
 # ==========================================
 # 1. System Initialization & CSS Black Theme
-# 系统初始化与全界面黑化样式 [cite: 322]
+# 系统初始化与全界面黑化样式 (深度适配表格与上传组件)
 # ==========================================
 st.set_page_config(page_title="PCB Detection System", layout="wide")
 
-# 注入增强版 CSS 实现全界面深度黑化（含上传组件与表格）
+# 注入增强版 CSS 实现全界面深度黑化 [cite: 322, 331]
 st.markdown("""
     <style>
-    /* 1. 全局与主背景 */
-    .stApp {
-        background-color: #0E1117;
-        color: #FFFFFF;
+    /* 1. 全局与主背景黑色 */
+    .stApp, [data-testid="stAppViewContainer"] {
+        background-color: #0E1117 !important;
+        color: #FFFFFF !important;
     }
 
-    /* 2. 侧边栏背景 */
+    /* 2. 侧边栏背景深色 */
     [data-testid="stSidebar"] {
-        background-color: #161B22;
+        background-color: #161B22 !important;
         border-right: 1px solid #30363d;
     }
 
-    /* 3. 强制文字颜色 */
-    h1, h2, h3, h4, h5, h6, p, span, label, .stMarkdown {
+    /* 3. 强制所有文本颜色为白色 */
+    h1, h2, h3, h4, h5, h6, p, span, label, .stMarkdown, .stDataFrame {
         color: #FFFFFF !important;
     }
 
-    /* 4. 上传组件区域黑化适配 */
+    /* 4. 彻底黑化上传组件区域 [针对 image_5166bc.jpg] */
     [data-testid="stFileUploadDropzone"] {
         background-color: #161B22 !important;
         border: 1px dashed #30363d !important;
-        color: #FFFFFF !important;
     }
-    /* 上传组件内部描述文字 */
+    /* 上传框内部文字 */
     [data-testid="stFileUploadDropzone"] div div span {
-        color: #8b949e !important;
-    }
-    /* 上传后的文件名文字 */
-    [data-testid="stFileUploaderFileName"] {
         color: #FFFFFF !important;
     }
 
-    /* 5. 数据表格区域黑化适配 */
-    [data-testid="stDataFrame"], [data-testid="stTable"] {
+    /* 5. 针对数据表格 st.dataframe 的深度黑化 */
+    /* 强制表格背景、边框和文字颜色 */
+    [data-testid="stDataFrame"] {
         background-color: #161B22 !important;
     }
-    /* 强制表格内部单元格、列头底色与文字 */
-    .stDataFrame div[role="gridcell"], 
-    .stDataFrame div[role="columnheader"],
-    .stDataFrame div[role="rowheader"] {
+    /* 覆盖表格内部所有单元格和标题的背景 */
+    div[data-testid="stDataFrame"] div[role="gridcell"],
+    div[data-testid="stDataFrame"] div[role="columnheader"],
+    div[data-testid="stDataFrame"] div[role="rowheader"] {
         background-color: #161B22 !important;
         color: #FFFFFF !important;
-        border-color: #30363d !important;
-    }
-    /* 针对交互式容器底色 */
-    div[data-testid="stDataFrame"] > div {
-        background-color: #161B22 !important;
+        border: 1px solid #30363d !important;
     }
 
     /* 6. 按钮、下拉框与交互组件 */
     .stButton>button {
-        background-color: #21262d;
-        color: white;
-        border: 1px solid #30363d;
+        background-color: #21262d !important;
+        color: white !important;
+        border: 1px solid #30363d !important;
         width: 100%;
     }
-    .stButton>button:hover {
-        border-color: #8b949e;
-        color: #58a6ff;
-    }
     div[data-baseweb="select"] > div {
-        background-color: #0E1117 !important;
+        background-color: #161B22 !important;
         color: white !important;
     }
-    /* 滑块数值文字 */
-    div[data-testid="stThumbValue"] {
+    /* 统计看板 (Info/Success) 背景加深 */
+    .stAlert {
+        background-color: #161B22 !important;
         color: white !important;
+        border: 1px solid #30363d !important;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -160,7 +150,7 @@ class C2f_Custom(nn.Module):
         except:
             return self.attn(self.cv2(torch.cat(y, 1)))
 
-# 执行模块注入 [cite: 348-350]
+# 运行时模块注入 [cite: 348-350]
 block.C2f = C2f_Custom
 tasks.C2f = C2f_Custom
 setattr(block, 'CBAM', CBAM)
@@ -193,11 +183,11 @@ def get_component_type(class_name):
 def process_features(image, algorithm):
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     out_img = image.copy()
-    if "Algorithm 1" in algorithm:  # SIFT [cite: 138-140]
+    if "Algorithm 1" in algorithm:  # SIFT [cite: 138, 150-160]
         sift = cv2.SIFT_create()
         kp, _ = sift.detectAndCompute(gray, None)
         for p in kp: cv2.circle(out_img, (int(p.pt[0]), int(p.pt[1])), 3, (0, 255, 255), -1)
-    else:  # ORB [cite: 170-172]
+    else:  # ORB [cite: 167, 175-178]
         orb = cv2.ORB_create(nfeatures=2000)
         kp, _ = orb.detectAndCompute(gray, None)
         for p in kp: cv2.circle(out_img, (int(p.pt[0]), int(p.pt[1])), 3, (255, 0, 255), -1)
@@ -205,7 +195,7 @@ def process_features(image, algorithm):
 
 
 # ==========================================
-# 4. Main UI Logic / 主界面逻辑 [cite: 331-335]
+# 4. UI Main Logic / 界面主逻辑
 # ==========================================
 with st.sidebar:
     st.header("Configuration / 配置")
@@ -237,7 +227,7 @@ if uploaded_files:
     if model is None:
         st.error("Model not found in models/ folder.")
     else:
-        if proc_mode == "Fast Batch Scan (快速批量扫描)":
+        if proc_mode == "Fast Batch Scan (快速批量扫描)": [cite: 333-335]
             st.info(f"Fast scanning images...")
             progress_bar = st.progress(0)
             current_scan_data = []
@@ -267,7 +257,7 @@ if uploaded_files:
                 st.divider()
                 df_all = pd.DataFrame(st.session_state.history)
                 st.subheader("Consolidated Defect Report / 缺陷汇总表格")
-                st.dataframe(df_all, use_container_width=True)
+                st.dataframe(df_all, use_container_width=True) # 表格黑化已由 CSS 强制覆盖
 
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
@@ -317,7 +307,7 @@ if uploaded_files:
                 last_file_name = uploaded_files[-1].name
                 df_curr = df_all[df_all["File"] == last_file_name]
 
-                # 物理计数算法逻辑
+                # 物理计数算法
                 def get_physical_count(df_subset):
                     num_boxes = len(df_subset)
                     if num_boxes == 0: return 0
