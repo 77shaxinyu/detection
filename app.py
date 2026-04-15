@@ -114,7 +114,7 @@ def get_cloud_templates_list(file_name, path_map):
     return templates
 
 def sift_dbscan_count_LOCAL(scene_gray, templates_list):
-    """严格搬运你本地的 SIFT 计数逻辑"""
+    """完全搬运你本地的 SIFT 计数逻辑"""
     sift = cv2.SIFT_create()
     kp_s, des_s = sift.detectAndCompute(scene_gray, None)
     if des_s is None: return 0
@@ -158,16 +158,20 @@ with st.sidebar:
     proc_mode = st.radio("Processing Mode", ["Interactive", "Fast Batch Scan"])
     model_choice = st.selectbox("Select Model", ["Model 1", "Model 2"])
     conf_thresh = st.slider("Confidence", 0.1, 1.0, 0.25)
+    
     if st.button("Clear Records"):
-        st.session_state.history = []; if os.path.exists(TEMP_DIR): shutil.rmtree(TEMP_DIR)
-        os.makedirs(TEMP_DIR, exist_ok=True); st.rerun()
+        st.session_state.history = []
+        if os.path.exists(TEMP_DIR):
+            shutil.rmtree(TEMP_DIR)
+        os.makedirs(TEMP_DIR, exist_ok=True)
+        st.rerun()
 
 @st.cache_resource
 def load_pcb_model(choice):
     path = "models/se.pt" if "1" in choice else "models/cbam.pt"
     if os.path.exists(path):
         try: return YOLO(path)
-        except EOFError: st.error(f"模型文件 {path} 损坏，请检查仓库。"); return None
+        except Exception as e: st.error(f"Error loading model {path}: {e}"); return None
     return None
 
 model = load_pcb_model(model_choice)
@@ -177,7 +181,7 @@ uploaded_files = st.file_uploader("Upload PCB Images", type=["jpg", "jpeg", "png
 
 if uploaded_files and model:
     if proc_mode == "Fast Batch Scan":
-        st.info("Fast scanning images with SIFT clustering...")
+        st.info("Fast scanning images...")
         curr_batch = []
         for file in uploaded_files:
             img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), 1)
@@ -197,6 +201,7 @@ if uploaded_files and model:
                     })
         st.session_state.history.extend(curr_batch)
         if st.session_state.history:
+            st.divider()
             df_all = pd.DataFrame(st.session_state.history)
             st.subheader("Consolidated Defect Report / 缺陷汇总表格")
             st.dataframe(df_all.drop(columns=["S_Count"], errors="ignore"), use_container_width=True)
@@ -231,6 +236,7 @@ if uploaded_files and model:
         if st.session_state.history:
             df_curr = pd.DataFrame([d for d in st.session_state.history if d['File'] == uploaded_files[-1].name])
             phys_total = int(df_curr["S_Count"].iloc[0]) if not df_curr.empty else 0
+            
             res_boxes = len(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
             cap_boxes = len(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
             total_boxes = res_boxes + cap_boxes
