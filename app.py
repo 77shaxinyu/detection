@@ -18,16 +18,7 @@ import ultralytics.nn.modules.block as block
 from ultralytics.nn.modules.conv import Conv
 
 # ==========================================
-# 1. System Initialization / 系统初始化
-# ==========================================
-TEMP_DIR = "temp_results"
-GITHUB_API_BASE = "https://api.github.com/repos/77shaxinyu/detection/contents/dataset_empty/"
-
-if not os.path.exists(TEMP_DIR):
-    os.makedirs(TEMP_DIR, exist_ok=True)
-
-# ==========================================
-# 2. Custom Modules Injection / 模块注入
+# 1. 模型架构定义 (SE/CBAM)
 # ==========================================
 class CBAM(nn.Module):
     def __init__(self, c1, ratio=16, kernel_size=7):
@@ -78,74 +69,89 @@ class C2f_Custom(nn.Module):
             return self.attn(self.cv2(torch.cat(y, 1)))
 
 block.C2f = tasks.C2f = C2f_Custom
-setattr(block, "CBAM", CBAM)
-setattr(tasks, "CBAM", CBAM)
-setattr(block, "SEAttention", SEAttention)
-setattr(tasks, "SEAttention", SEAttention)
+setattr(block, 'CBAM', CBAM)
+setattr(tasks, 'CBAM', CBAM)
+setattr(block, 'SEAttention', SEAttention)
+setattr(tasks, 'SEAttention', SEAttention)
 
 # ==========================================
-# 3. Core SIFT Logic / 本地算法逻辑
-# ==========================================
-def sift_count_logic_LOCAL(scene_gray, templates_list):
-    sift = cv2.SIFT_create()
-    kp_s, des_s = sift.detectAndCompute(scene_gray, None)
-    if des_s is None:
-        return 0
-    best_count = 0
-    max_good_matches = 0
-    for img_t_bgr in templates_list:
-        if img_t_bgr is None:
-            continue
-        img_t = cv2.cvtColor(img_t_bgr, cv2.COLOR_BGR2GRAY)
-        kp_t, des_t = sift.detectAndCompute(img_t, None)
-        if des_t is None:
-            continue
-        flann = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
-        matches = flann.knnMatch(des_t, des_s, k=2)
-        current_good_pts = []
-        for m, n in matches:
-            if m.distance < 0.75 * n.distance:
-                current_good_pts.append(kp_s[m.trainIdx].pt)
-        if len(current_good_pts) > max_good_matches:
-            max_good_matches = len(current_good_pts)
-            if len(current_good_pts) >= 5:
-                X = np.array(current_good_pts)
-                clustering = DBSCAN(eps=45, min_samples=4).fit(X)
-                unique_labels = set(clustering.labels_)
-                if -1 in unique_labels:
-                    unique_labels.remove(-1)
-                best_count = len(unique_labels)
-    return int(best_count)
-
-# ==========================================
-# 4. Helper Functions / 辅助工具
+# 2. 核心算法逻辑 (ORB/SIFT 级联定位)
 # ==========================================
 def draw_grid_9x9(image):
     h, w = image.shape[:2]
     grid_img = image.copy()
-    ch, cw = h / 9, w / 9
     for i in range(1, 9):
-        cv2.line(grid_img, (int(i * cw), 0), (int(i * cw), h), (0, 255, 0), 1)
-        cv2.line(grid_img, (0, int(i * ch)), (w, int(i * ch)), (0, 255, 0), 1)
-    return grid_img, ch, cw
+        cv2.line(grid_img, (int(i * w / 9), 0), (int(i * w / 9), h), (0, 255, 0), 2)
+        cv2.line(grid_img, (0, int(i * h / 9)), (w, int(i * h / 9)), (0, 255, 0), 2)
+    return grid_img, h / 9, w / 9
 
+def get_alignment_matrix(tpl_img, test_img, mode="ORB"):
+    if mode == "ORB":
+        detector = cv2.ORB_create(nfeatures=2000)
+        matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        ratio = 0.85
+    else:
+        detector = cv2.SIFT_create()
+        matcher = cv2.BFMatcher()
+        ratio = 0.75
+
+    kp1, des1 = detector.detectAndCompute(cv2.cvtColor(tpl_img, cv2.COLOR_BGR2GRAY), None)
+    kp2, des2 = detector.detectAndCompute(cv2.cvtColor(test_img, cv2.COLOR_BGR2GRAY), None)
+    if des1 is None or des2 is None:
+        return None
+
+    matches = matcher.knnMatch(des1, des2, k=2)
+    good = [m for m_pair in matches if len(m_pair) == 2 and m_pair[0].distance < ratio * m_pair[1].distance]
+    
+    if len(good) >= 8:
+        src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+        dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+        M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+        return M
+    return None
+
+def get_roi_detect(img, M, model, conf):
+    h, w = img.shape[:2]
+    roi_defs = [{"box": [[0, 0], [0, h], [w * 0.4, h], [w * 0.4, 0]]},
+                {"box": [[w * 0.6, 0], [w * 0.6, h], [w, h], [w, 0]]}]
+    final_boxes = []
+    for r in roi_defs:
+        pts = np.float32(r["box"]).reshape(-1, 1, 2)
+        dst = cv2.perspectiveTransform(pts, M)
+        rx, ry, rw, rh = cv2.boundingRect(dst)
+        rx, ry = max(0, rx), max(0, ry)
+        crop = img[ry:ry + rh, rx:rx + rw]
+        if crop.size > 0:
+            res = model.predict(crop, conf=conf, verbose=False)
+            for r_obj in res:
+                for b in r_obj.boxes:
+                    bx1, by1, bx2, by2 = b.xyxy[0].cpu().numpy()
+                    final_boxes.append({
+                        "xyxy": [bx1 + rx, by1 + ry, bx2 + rx, by2 + ry], 
+                        "cls": int(b.cls[0]), 
+                        "conf": float(b.conf[0])
+                    })
+    return final_boxes
+
+# ==========================================
+# 3. 辅助函数
+# ==========================================
 def get_grid_pos(x_center, y_center, cell_h, cell_w):
     col = chr(ord("A") + int(x_center / cell_w))
     row = int(y_center / cell_h) + 1
     return f"{col}{row}"
 
 def get_component_type(class_name):
-    name_lower = class_name.lower()
-    if "resistor" in name_lower:
+    if "resistor" in class_name.lower():
         return "Resistor / 电阻"
     return "Capacitor / 电容"
 
 @st.cache_data
-def get_cloud_templates_list(file_name, path_map):
+def get_cloud_templates(file_name, path_map):
     rel_path = path_map.get(file_name)
     if not rel_path:
         return []
-    api_url = f"{GITHUB_API_BASE}{rel_path.replace('\\', '/')}"
+    api_url = f"https://api.github.com/repos/77shaxinyu/detection/contents/dataset_empty/{rel_path.replace('\\', '/')}"
     templates = []
     try:
         res = requests.get(api_url, timeout=5).json()
@@ -160,7 +166,7 @@ def get_cloud_templates_list(file_name, path_map):
     return templates
 
 # ==========================================
-# 5. UI Logic / 界面逻辑
+# 4. Streamlit UI 界面
 # ==========================================
 st.set_page_config(page_title="PCB Inspection System", layout="wide")
 
@@ -175,8 +181,9 @@ path_map = load_path_map()
 
 with st.sidebar:
     st.header("Configuration")
-    proc_mode = st.radio("Mode", ["Interactive", "Fast Batch Scan"])
-    model_choice = st.selectbox("Model", ["Model 1", "Model 2"])
+    proc_mode = st.radio("Processing Mode", ["Interactive", "Fast Batch Scan"])
+    model_choice = st.selectbox("DL Model", ["Model 1 (SE)", "Model 2 (CBAM)"])
+    algo_choice = st.selectbox("Alignment Algorithm", ["ORB", "SIFT"])
     conf_thresh = st.slider("Confidence", 0.1, 1.0, 0.25)
     if st.button("Clear Records"):
         st.session_state.history = []
@@ -187,7 +194,7 @@ with st.sidebar:
 
 @st.cache_resource
 def load_pcb_model(choice):
-    path = "models/se.pt" if "1" in choice else "models/cbam.pt"
+    path = "models/se.pt" if "SE" in choice else "models/cbam.pt"
     if os.path.exists(path):
         try:
             return YOLO(path)
@@ -202,82 +209,69 @@ if "history" not in st.session_state:
 uploaded_files = st.file_uploader("Upload PCB Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
 if uploaded_files and model:
-    if proc_mode == "Fast Batch Scan":
-        st.info("Fast batch scanning...")
-        progress_bar = st.progress(0)
-        all_results = []
-        for idx, file in enumerate(uploaded_files):
-            img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), 1)
-            tpls = get_cloud_templates_list(file.name, path_map)
-            s_count = sift_count_logic_LOCAL(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), tpls)
-            yolo_res = model.predict(img, conf=conf_thresh, verbose=False)
-            for r in yolo_res:
-                for b in r.boxes:
-                    x1, y1, x2, y2 = b.xyxy[0].cpu().numpy()
-                    cls = model.names[int(b.cls[0])]
-                    all_results.append({
-                        "File": file.name, "Type / 类型": get_component_type(cls),
-                        "Class / 类别": cls, "Confidence / 置信度": f"{float(b.conf[0]):.2f}",
-                        "Grid / 网格": get_grid_pos((x1+x2)/2, (y1+y2)/2, img.shape[0]/9, img.shape[1]/9),
-                        "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})",
-                        "S_Count": s_count
-                    })
-            progress_bar.progress((idx + 1) / len(uploaded_files))
-        st.session_state.history = all_results
-    else:
-        for file in uploaded_files:
-            img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), 1)
-            tpls = get_cloud_templates_list(file.name, path_map)
-            s_count = sift_count_logic_LOCAL(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), tpls)
-            res = model.predict(img, conf=conf_thresh, verbose=False)
+    for f in uploaded_files:
+        img_bgr = cv2.imdecode(np.frombuffer(f.read(), np.uint8), 1)
+        tpls = get_cloud_templates(f.name, path_map)
+        
+        with st.spinner(f"Analyzing {f.name} with {algo_choice}..."):
+            final_boxes = []
+            if tpls:
+                M = get_alignment_matrix(tpls[0], img_bgr, mode=algo_choice)
+                if M is not None:
+                    final_boxes = get_roi_detect(img_bgr, M, model, conf_thresh)
             
-            # --- 找回 9x9 网格绘制 ---
-            canvas, ch, cw = draw_grid_9x9(img)
+            if not final_boxes:
+                res = model.predict(img_bgr, conf=conf_thresh, verbose=False)
+                for r in res:
+                    for b in r.boxes:
+                        final_boxes.append({
+                            "xyxy": b.xyxy[0].cpu().numpy(), 
+                            "cls": int(b.cls[0]), 
+                            "conf": float(b.conf[0])
+                        })
+
+        canvas, ch, cw = draw_grid_9x9(img_bgr)
+        st.session_state.history = [d for d in st.session_state.history if d["File"] != f.name]
+        
+        for box in final_boxes:
+            x1, y1, x2, y2 = map(int, box["xyxy"])
+            cls_name = model.names[box["cls"]]
+            pos = get_grid_pos((x1+x2)/2, (y1+y2)/2, ch, cw)
             
-            st.session_state.history = [d for d in st.session_state.history if d["File"] != file.name]
-            for r in res:
-                for b in r.boxes:
-                    x1, y1, x2, y2 = map(int, b.xyxy[0].cpu().numpy())
-                    cls = model.names[int(b.cls[0])]
-                    pos = get_grid_pos((x1+x2)/2, (y1+y2)/2, ch, cw)
-                    st.session_state.history.append({
-                        "File": file.name, "Type / 类型": get_component_type(cls),
-                        "Class / 类别": cls, "Confidence / 置信度": f"{float(b.conf[0]):.2f}",
-                        "Grid / 网格": pos,
-                        "Coordinates / 坐标": f"({x1},{y1},{x2},{y2})",
-                        "S_Count": s_count
-                    })
-                    # --- 找回画框与文字标注 ---
-                    cv2.rectangle(canvas, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                    label = f"{cls} {pos}"
-                    cv2.putText(canvas, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 2)
-            st.image(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+            st.session_state.history.append({
+                "File": f.name,
+                "Type / 类型": get_component_type(cls_name),
+                "Class / 类别": cls_name,
+                "Confidence": f"{box['conf']:.2f}",
+                "Grid / 网格": pos,
+                "Coordinates": f"({x1},{y1},{x2},{y2})"
+            })
+            
+            if proc_mode == "Interactive":
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                cv2.putText(canvas, f"{cls_name} {pos}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 2)
 
     if st.session_state.history:
         df_all = pd.DataFrame(st.session_state.history)
-        last_file = uploaded_files[-1].name
-        df_curr = df_all[df_all["File"] == last_file]
         
-        if proc_mode != "Fast Batch Scan":
-            phys_total = int(df_curr["S_Count"].iloc[0]) if not df_curr.empty else 0
-            res_boxes = len(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
-            cap_boxes = len(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
-            total_boxes = res_boxes + cap_boxes
-            res_phys = int(round(phys_total * (res_boxes / total_boxes))) if total_boxes > 0 else 0
-            cap_phys = phys_total - res_phys
-
+        if proc_mode == "Interactive":
+            st.image(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+            
+            df_curr = df_all[df_all["File"] == uploaded_files[-1].name]
+            res_count = len(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
+            cap_count = len(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
+            
             st.divider()
             c1, c2, c3 = st.columns(3)
-            c1.info(f"Resistors / 电阻: {res_phys}")
-            c2.info(f"Capacitors / 电容: {cap_phys}")
-            c3.success(f"Total: {phys_total}")
-        
-        st.subheader("Inspection Report")
-        display_df = df_all.drop(columns=["S_Count"], errors="ignore")
-        st.dataframe(display_df, use_container_width=True)
+            c1.info(f"Resistors / 电阻: {res_count}")
+            c2.info(f"Capacitors / 电容: {cap_count}")
+            c3.success(f"Total: {res_count + cap_count}")
 
-        csv_data = display_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+        st.subheader("Inspection Report")
+        st.dataframe(df_all, use_container_width=True)
+
+        csv_data = df_all.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zf:
-            zf.writestr("inspection_report.csv", csv_data)
-        st.download_button("Download ZIP", data=zip_buffer.getvalue(), file_name="results.zip", use_container_width=True)
+            zf.writestr("report.csv", csv_data)
+        st.download_button("Download Report ZIP", data=zip_buffer.getvalue(), file_name="results.zip", use_container_width=True)
