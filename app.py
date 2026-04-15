@@ -150,7 +150,7 @@ def sift_dbscan_count(scene_img, templates):
                 unique_labels = set(clustering.labels_)
                 if -1 in unique_labels: unique_labels.remove(-1)
                 best_count = len(unique_labels)
-    return best_count
+    return int(best_count)
 
 # ==========================================
 # 4. Streamlit UI / 界面显示
@@ -180,7 +180,13 @@ with st.sidebar:
 @st.cache_resource
 def load_pcb_model(choice):
     path = "models/se.pt" if choice == "Model 1" else "models/cbam.pt"
-    return YOLO(path) if os.path.exists(path) else None
+    if os.path.exists(path):
+        try:
+            return YOLO(path)
+        except EOFError:
+            st.error(f"模型文件 {path} 损坏，请重新上传。")
+            return None
+    return None
 
 model = load_pcb_model(model_choice)
 if "history" not in st.session_state: st.session_state.history = []
@@ -256,15 +262,16 @@ if uploaded_files and model:
             last_file_name = uploaded_files[-1].name
             df_curr = df_all[df_all["File"] == last_file_name]
 
-            # --- 物理计数逻辑升级 ---
-            phys_total = df_curr["S_Count"].iloc[0] if not df_curr.empty else 0
+            # --- 物理计数逻辑修正 ---
+            # 强制转换为 int 以移除 .0 后缀
+            phys_total = int(df_curr["S_Count"].iloc[0]) if not df_curr.empty else 0
+            
             res_boxes = len(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
             cap_boxes = len(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
             total_boxes = res_boxes + cap_boxes
             
-            # 按比例分摊 SIFT 得到的物理计数
             if total_boxes > 0:
-                res_phys = round(phys_total * (res_boxes / total_boxes))
+                res_phys = int(round(phys_total * (res_boxes / total_boxes)))
                 cap_phys = phys_total - res_phys
             else:
                 res_phys = cap_phys = 0
@@ -272,7 +279,7 @@ if uploaded_files and model:
             c1, c2, c3 = st.columns(3)
             c1.info(f"Resistors / 电阻: {res_phys}")
             c2.info(f"Capacitors / 电容: {cap_phys}")
-            c3.success(f"Total: {phys_total}")
+            c3.success(f"Physical Total (SIFT): {phys_total}")
 
             display_path = os.path.join(TEMP_DIR, f"{os.path.splitext(last_file_name)[0]}_{model_choice}_annotated.jpg")
             if os.path.exists(display_path):
