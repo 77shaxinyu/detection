@@ -17,7 +17,7 @@ import ultralytics.nn.modules.block as block
 from ultralytics.nn.modules.conv import Conv
 
 # ==========================================
-# 1. 模型架构定义 (SE/CBAM)
+# 1. 模型架构定义
 # ==========================================
 class CBAM(nn.Module):
     def __init__(self, c1, ratio=16, kernel_size=7):
@@ -85,11 +85,12 @@ def draw_grid_9x9(image):
     return grid_img, h / 9, w / 9
 
 def get_alignment_matrix(tpl_img, test_img, algo_name):
-    if "Algorithm 2" in algo_name:
+    # 映射算法逻辑
+    if "Algorithm 2" in algo_name: # 原 ORB
         detector = cv2.ORB_create(nfeatures=2000)
         matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
         ratio = 0.85
-    else:
+    else: # 原 SIFT
         detector = cv2.SIFT_create()
         matcher = cv2.BFMatcher()
         ratio = 0.75
@@ -132,6 +133,9 @@ def get_roi_detect(img, M, model, conf):
                     final_boxes.append({"xyxy": [bx1 + rx, by1 + ry, bx2 + rx, by2 + ry], "cls": int(b.cls[0]), "conf": float(b.conf[0])})
     return final_boxes
 
+# ==========================================
+# 3. 辅助功能
+# ==========================================
 def get_grid_pos(x_center, y_center, cell_h, cell_w):
     col = chr(ord("A") + int(x_center / cell_w))
     row = int(y_center / cell_h) + 1
@@ -158,16 +162,9 @@ def get_cloud_templates(file_name, path_map):
     return templates
 
 # ==========================================
-# 3. Streamlit UI 界面 (含一键清空功能)
+# 4. Streamlit UI 界面 (双语版)
 # ==========================================
 st.set_page_config(page_title="PCB Inspection System / 巡检系统", layout="wide")
-
-# 初始化图片上传器的 key
-if "uploader_key" not in st.session_state:
-    st.session_state.uploader_key = 0
-
-if "history" not in st.session_state:
-    st.session_state.history = []
 
 @st.cache_data
 def load_path_map():
@@ -176,6 +173,8 @@ def load_path_map():
     return {}
 
 path_map = load_path_map()
+TEMP_DIR = "temp_results"
+if not os.path.exists(TEMP_DIR): os.makedirs(TEMP_DIR, exist_ok=True)
 
 with st.sidebar:
     st.header("Configuration / 配置")
@@ -183,19 +182,15 @@ with st.sidebar:
     model_choice = st.selectbox("DL Model / 检测模型", ["Model 1 / 模型 1", "Model 2 / 模型 2"])
     algo_choice = st.selectbox("Alignment Algorithm / 定位算法", ["Algorithm 1 / 算法 1", "Algorithm 2 / 算法 2"])
     conf_thresh = st.slider("Confidence / 置信度", 0.1, 1.0, 0.25)
-    
-    # 功能 1：清空历史识别记录
-    if st.button("Clear Report Records / 清空报告记录"):
+    if st.button("Clear Records / 清空记录"):
         st.session_state.history = []
-        st.rerun()
-    
-    # 功能 2：一键清空所有已上传的图片
-    if st.button("Clear All Uploaded Images / 清空所有上传图片"):
-        st.session_state.uploader_key += 1 # 改变 key 强制重置组件
+        if os.path.exists(TEMP_DIR): shutil.rmtree(TEMP_DIR)
+        os.makedirs(TEMP_DIR, exist_ok=True)
         st.rerun()
 
 @st.cache_resource
 def load_pcb_model(choice):
+    # Model 1 -> se.pt, Model 2 -> cbam.pt
     path = "models/se.pt" if "1" in choice else "models/cbam.pt"
     if os.path.exists(path):
         try: return YOLO(path)
@@ -203,19 +198,11 @@ def load_pcb_model(choice):
     return None
 
 model = load_pcb_model(model_choice)
+if "history" not in st.session_state: st.session_state.history = []
 
-# 使用动态 key 的上传组件
-uploaded_files = st.file_uploader(
-    "Upload Images / 上传图片", 
-    type=["jpg", "jpeg", "png"], 
-    accept_multiple_files=True,
-    key=f"uploader_{st.session_state.uploader_key}"
-)
+uploaded_files = st.file_uploader("Upload Images / 上传图片", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
 if uploaded_files and model:
-    # 临时存放本次上传的处理结果
-    current_results = []
-    
     for f in uploaded_files:
         img_bgr = cv2.imdecode(np.frombuffer(f.read(), np.uint8), 1)
         tpls = get_cloud_templates(f.name, path_map)
@@ -234,13 +221,14 @@ if uploaded_files and model:
                         final_boxes.append({"xyxy": b.xyxy[0].cpu().numpy(), "cls": int(b.cls[0]), "conf": float(b.conf[0])})
 
         canvas, ch, cw = draw_grid_9x9(img_bgr)
+        st.session_state.history = [d for d in st.session_state.history if d["File"] != f.name]
         
         for box in final_boxes:
             x1, y1, x2, y2 = map(int, box["xyxy"])
             cls_name = model.names[box["cls"]]
             pos = get_grid_pos((x1+x2)/2, (y1+y2)/2, ch, cw)
             
-            current_results.append({
+            st.session_state.history.append({
                 "File": f.name,
                 "Type / 类型": get_component_type(cls_name),
                 "Class / 类别": cls_name,
@@ -252,9 +240,6 @@ if uploaded_files and model:
             if "Interactive" in proc_mode:
                 cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 0, 255), 2)
                 cv2.putText(canvas, f"{cls_name} {pos}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 2)
-
-    # 更新全局历史记录
-    st.session_state.history = current_results
 
     if st.session_state.history:
         df_all = pd.DataFrame(st.session_state.history)
