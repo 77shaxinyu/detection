@@ -11,6 +11,7 @@ import requests
 import torch
 import torch.nn as nn
 from datetime import datetime
+from sklearn.cluster import DBSCAN
 from ultralytics import YOLO
 import ultralytics.nn.tasks as tasks
 import ultralytics.nn.modules.block as block
@@ -20,7 +21,6 @@ from ultralytics.nn.modules.conv import Conv
 # 1. System Initialization / 系统初始化
 # ==========================================
 TEMP_DIR = "temp_results"
-INDEX_FILE = "path_index.json"
 GITHUB_API_BASE = "https://api.github.com/repos/77shaxinyu/detection/contents/dataset_empty/"
 
 if not os.path.exists(TEMP_DIR):
@@ -47,7 +47,8 @@ class CBAM(nn.Module):
         x = x * channel_att
         avg_out = torch.mean(x, dim=1, keepdim=True)
         max_out, _ = torch.max(x, dim=1, keepdim=True)
-        x = x * self.spatial(torch.cat([avg_out, max_out], dim=1))
+        spatial_input = torch.cat([avg_out, max_out], dim=1)
+        x = x * self.spatial(spatial_input)
         return x
 
 class SEAttention(nn.Module):
@@ -62,7 +63,8 @@ class SEAttention(nn.Module):
 
     def forward(self, x):
         b, c, _, _ = x.size()
-        y = self.fc(self.avg_pool(x).view(b, c)).view(b, c, 1, 1)
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
         return x * y.expand_as(x)
 
 class C2f_Custom(nn.Module):
@@ -86,7 +88,7 @@ setattr(block, 'CBAM', CBAM); setattr(tasks, 'CBAM', CBAM)
 setattr(block, 'SEAttention', SEAttention); setattr(tasks, 'SEAttention', SEAttention)
 
 # ==========================================
-# 3. Helper & Cascade Functions / 核心算法
+# 3. Core Algorithms / 核心算法 (DBSCAN + Helper)
 # ==========================================
 def draw_grid_9x9(image):
     h, w = image.shape[:2]
@@ -107,57 +109,52 @@ def get_component_type(class_name):
     return "Resistor / 电阻" if "resistor" in name_lower else "Capacitor / 电容"
 
 @st.cache_data
-def get_cloud_template_img(file_name, path_map):
+def get_cloud_templates_list(file_name, path_map):
+    """获取 GitHub 对应文件夹下所有模板（模拟本地遍历）"""
     rel_path = path_map.get(file_name)
-    if not rel_path: return None
+    if not rel_path: return []
     api_url = f"{GITHUB_API_BASE}{rel_path.replace('\\', '/')}"
+    templates = []
     try:
         res = requests.get(api_url, timeout=5).json()
-        f_info = next((f for f in res if f['name'].lower().endswith(('.jpg', '.png'))), None)
-        if f_info:
-            data = requests.get(f_info['download_url']).content
-            return cv2.imdecode(np.frombuffer(data, np.uint8), 1)
+        for item in res:
+            if item['name'].lower().endswith(('.jpg', '.png', '.jpeg')):
+                data = requests.get(item['download_url']).content
+                img = cv2.imdecode(np.frombuffer(data, np.uint8), 1)
+                if img is not None: templates.append(img)
     except: pass
-    return None
+    return templates
 
-def cascade_sift_detect(tpl_img, test_img, model, conf):
-    """严格本地 SIFT 级联逻辑"""
-    h_tpl, w_tpl = tpl_img.shape[:2]
-    sift = cv2.SIFT_create(nfeatures=2000)
-    kp1, des1 = sift.detectAndCompute(cv2.cvtColor(tpl_img, cv2.COLOR_BGR2GRAY), None)
-    kp2, des2 = sift.detectAndCompute(cv2.cvtColor(test_img, cv2.COLOR_BGR2GRAY), None)
-    
-    M = None
-    if des1 is not None and des2 is not None:
-        matches = cv2.BFMatcher().knnMatch(des1, des2, k=2)
-        good = [m for m, n in matches if m.distance < 0.8 * n.distance]
-        if len(good) >= 8:
-            src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
-            dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-            M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+def sift_dbscan_count(scene_img, templates):
+    """严格按照你本地的 SIFT-DBSCAN 聚类计数逻辑"""
+    scene_gray = cv2.cvtColor(scene_img, cv2.COLOR_BGR2GRAY)
+    sift = cv2.SIFT_create()
+    kp_s, des_s = sift.detectAndCompute(scene_gray, None)
+    if des_s is None: return 0
 
-    final_boxes = []
-    if M is not None:
-        roi_defs = [{"box": [[0, 0], [0, h_tpl], [w_tpl*0.4, h_tpl], [w_tpl*0.4, 0]]},
-                    {"box": [[w_tpl*0.6, 0], [w_tpl*0.6, h_tpl], [w_tpl, h_tpl], [w_tpl, 0]]}]
-        for r in roi_defs:
-            dst = cv2.perspectiveTransform(np.float32(r["box"]).reshape(-1, 1, 2), M)
-            rx, ry, rw, rh = cv2.boundingRect(dst)
-            rx, ry = max(0, rx), max(0, ry)
-            crop = test_img[ry:ry+rh, rx:rx+rw]
-            if crop.size > 0:
-                res = model.predict(crop, conf=conf, verbose=False)
-                for r_obj in res:
-                    for b in r_obj.boxes:
-                        bx1, by1, bx2, by2 = b.xyxy[0].cpu().numpy()
-                        final_boxes.append({"xyxy": [bx1+rx, by1+ry, bx2+rx, by2+ry], "cls": int(b.cls[0]), "conf": float(b.conf[0])})
-    
-    if not final_boxes: # 保底
-        res = model.predict(test_img, conf=conf, verbose=False)
-        for r_obj in res:
-            for b in r_obj.boxes:
-                final_boxes.append({"xyxy": b.xyxy[0].cpu().numpy(), "cls": int(b.cls[0]), "conf": float(b.conf[0])})
-    return final_boxes
+    best_count, max_good_matches = 0, 0
+    for t_img in templates:
+        t_gray = cv2.cvtColor(t_img, cv2.COLOR_BGR2GRAY)
+        kp_t, des_t = sift.detectAndCompute(t_gray, None)
+        if des_t is None: continue
+
+        flann = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
+        matches = flann.knnMatch(des_t, des_s, k=2)
+
+        current_good_pts = []
+        for m, n in matches:
+            if m.distance < 0.75 * n.distance:
+                current_good_pts.append(kp_s[m.trainIdx].pt)
+
+        if len(current_good_pts) > max_good_matches:
+            max_good_matches = len(current_good_pts)
+            if len(current_good_pts) >= 5:
+                X = np.array(current_good_pts)
+                clustering = DBSCAN(eps=45, min_samples=4).fit(X)
+                unique_labels = set(clustering.labels_)
+                if -1 in unique_labels: unique_labels.remove(-1)
+                best_count = len(unique_labels)
+    return best_count
 
 # ==========================================
 # 4. Streamlit UI / 界面显示
@@ -195,100 +192,106 @@ if "history" not in st.session_state: st.session_state.history = []
 
 uploaded_files = st.file_uploader("Upload PCB Images / 上传图片", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
-if uploaded_files:
-    if model is None: st.error("Model not found.")
-    else:
-        if proc_mode == "Fast Batch Scan (快速批量扫描)":
-            st.info("Fast scanning images...")
-            progress_bar = st.progress(0)
-            current_scan_data = []
+if uploaded_files and model:
+    if proc_mode == "Fast Batch Scan (快速批量扫描)":
+        st.info("Fast scanning with DBSCAN clustering...")
+        progress_bar = st.progress(0)
+        current_scan_data = []
 
-            for idx, file in enumerate(uploaded_files):
-                img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), 1)
-                h, w = img.shape[:2]
-                
-                # 级联逻辑
-                tpl = get_cloud_template_img(file.name, path_map)
-                boxes = cascade_sift_detect(tpl if tpl is not None else img, img, model, conf_thresh)
+        for idx, file in enumerate(uploaded_files):
+            img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), 1)
+            h, w = img.shape[:2]
+            
+            # SIFT 物理计数
+            tpls = get_cloud_templates_list(file.name, path_map)
+            sift_count = sift_dbscan_count(img, tpls)
+            
+            # YOLO 坐标获取 (表格记录用)
+            results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True, verbose=False)
 
-                for b in boxes:
-                    cls = model.names[b["cls"]]
+            for r in results:
+                for box in r.boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    cls = model.names[int(box.cls[0])]
                     current_scan_data.append({
                         "File": file.name,
                         "Type / 类型": get_component_type(cls),
                         "Class / 类别": cls,
-                        "Confidence / 置信度": f"{b['conf']:.2f}",
-                        "Grid / 网格": get_grid_pos((b["xyxy"][0] + b["xyxy"][2]) / 2, (b["xyxy"][1] + b["xyxy"][3]) / 2, h / 9, w / 9),
-                        "Coordinates / 坐标": f"({int(b['xyxy'][0])},{int(b['xyxy'][1])},{int(b['xyxy'][2])},{int(b['xyxy'][3])})"
+                        "Confidence / 置信度": f"{float(box.conf[0]):.2f}",
+                        "Grid / 网格": get_grid_pos((x1 + x2) / 2, (y1 + y2) / 2, h / 9, w / 9),
+                        "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})",
+                        "DBSCAN_Count": sift_count # 隐藏记录物理计数
                     })
-                progress_bar.progress((idx + 1) / len(uploaded_files))
+            progress_bar.progress((idx + 1) / len(uploaded_files))
 
-            st.session_state.history.extend(current_scan_data)
-            if st.session_state.history:
-                st.divider()
-                df_all = pd.DataFrame(st.session_state.history)
-                st.subheader("Consolidated Defect Report / 缺陷汇总表格")
-                st.dataframe(df_all, use_container_width=True)
+        st.session_state.history.extend(current_scan_data)
+        if st.session_state.history:
+            st.divider()
+            df_all = pd.DataFrame(st.session_state.history)
+            st.subheader("Consolidated Defect Report / 缺陷汇总表格")
+            st.dataframe(df_all, use_container_width=True)
 
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                    csv_data = df_all.to_csv(index=False, encoding='utf-8-sig')
-                    zip_file.writestr("total_defects_report.csv", csv_data)
-                st.download_button(label="Download Consolidated ZIP", data=zip_buffer.getvalue(), file_name=f"Batch_Scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                csv_data = df_all.to_csv(index=False, encoding='utf-8-sig')
+                zip_file.writestr("total_defects_report.csv", csv_data)
+            st.download_button(label="Download Consolidated ZIP", data=zip_buffer.getvalue(), file_name=f"Batch_Scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
 
-        else:
-            # Interactive Mode Logic
-            for file in uploaded_files:
-                file_base = os.path.splitext(file.name)[0]
-                target_path = os.path.join(TEMP_DIR, f"{file_base}_{model_choice}_annotated.jpg")
+    else:
+        # Interactive Mode Logic
+        for file in uploaded_files:
+            file_base = os.path.splitext(file.name)[0]
+            target_path = os.path.join(TEMP_DIR, f"{file_base}_{model_choice}_annotated.jpg")
 
-                img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), 1)
-                grid_img, ch, cw = draw_grid_9x9(img)
+            img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), 1)
+            grid_img, ch, cw = draw_grid_9x9(img)
 
-                # 级联识别
-                tpl = get_cloud_template_img(file.name, path_map)
-                boxes = cascade_sift_detect(tpl if tpl is not None else img, img, model, conf_thresh)
+            # 1. 物理计数逻辑 (严格按 SIFT 聚类)
+            tpls = get_cloud_templates_list(file.name, path_map)
+            sift_count = sift_dbscan_count(img, tpls)
 
-                st.session_state.history = [d for d in st.session_state.history if d['File'] != file.name]
+            # 2. YOLO 检测用于标注
+            results = model.predict(img, conf=conf_thresh, iou=0.45, agnostic_nms=True)
+            st.session_state.history = [d for d in st.session_state.history if d['File'] != file.name]
 
-                for b in boxes:
-                    x1, y1, x2, y2 = map(int, b["xyxy"])
-                    cls = model.names[b["cls"]]
+            for r in results:
+                for box in r.boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    cls = model.names[int(box.cls[0])]
                     pos = get_grid_pos((x1 + x2) / 2, (y1 + y2) / 2, ch, cw)
                     entry = {
-                        "File": file.name,
-                        "Type / 类型": get_component_type(cls),
-                        "Class / 类别": cls,
-                        "Confidence / 置信度": f"{b['conf']:.2f}",
-                        "Grid / 网格": pos,
-                        "Coordinates / 坐标": f"({x1},{y1},{x2},{y2})"
+                        "File": file.name, "Type / 类型": get_component_type(cls),
+                        "Class / 类别": cls, "Confidence / 置信度": f"{float(box.conf[0]):.2f}",
+                        "Grid / 网格": pos, "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})",
+                        "DBSCAN_Count": sift_count
                     }
                     st.session_state.history.append(entry)
-                    cv2.rectangle(grid_img, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                    cv2.putText(grid_img, f"{cls} {pos}", (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 0), 2)
+                    cv2.rectangle(grid_img, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
+                    cv2.putText(grid_img, f"{cls} {pos}", (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 0), 2)
 
-                cv2.imwrite(target_path, grid_img)
+            cv2.imwrite(target_path, grid_img)
 
-            if st.session_state.history:
-                st.divider()
-                df_all = pd.DataFrame(st.session_state.history)
-                last_file_name = uploaded_files[-1].name
-                df_curr = df_all[df_all["File"] == last_file_name]
+        if st.session_state.history:
+            st.divider()
+            df_all = pd.DataFrame(st.session_state.history)
+            last_file_name = uploaded_files[-1].name
+            df_curr = df_all[df_all["File"] == last_file_name]
 
-                def get_physical_count(df_subset):
-                    num = len(df_subset)
-                    if num == 0: return 0
-                    return 1 if num == 1 else int(num / 2)
+            # --- 修改统计展示逻辑 ---
+            # 统计当前文件不同类型的物理数量 (根据 DBSCAN 计数分配)
+            res_df = df_curr[df_curr["Type / 类型"].str.contains("Resistor")]
+            cap_df = df_curr[df_curr["Type / 类型"].str.contains("Capacitor")]
+            
+            # 由于 DBSCAN 计算的是该型号总元件数，此处我们取记录的 DBSCAN_Count 值
+            physical_total = df_curr["DBSCAN_Count"].iloc[0] if not df_curr.empty else 0
+            
+            c1, c2, c3 = st.columns(3)
+            # 此处我们将 SIFT 聚类得到的结果作为物理计数展示
+            c1.info(f"Resistors / 电阻: 待定") # SIFT 目前是针对单型号全计数，此处为展示一致性
+            c2.info(f"Capacitors / 电容: 待定")
+            c3.success(f"Physical Total (SIFT): {physical_total}")
 
-                res_c = get_physical_count(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
-                cap_c = get_physical_count(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
-
-                c1, c2, c3 = st.columns(3)
-                c1.info(f"Resistors / 电阻: {res_c}")
-                c2.info(f"Capacitors / 电容: {cap_c}")
-                c3.success(f"Total / 总计: {res_c + cap_c}")
-
-                display_path = os.path.join(TEMP_DIR, f"{os.path.splitext(last_file_name)[0]}_{model_choice}_annotated.jpg")
-                if os.path.exists(display_path):
-                    st.image(cv2.cvtColor(cv2.imread(display_path), cv2.COLOR_BGR2RGB))
-                st.dataframe(df_curr, use_container_width=True)
+            display_path = os.path.join(TEMP_DIR, f"{os.path.splitext(last_file_name)[0]}_{model_choice}_annotated.jpg")
+            if os.path.exists(display_path):
+                st.image(cv2.cvtColor(cv2.imread(display_path), cv2.COLOR_BGR2RGB))
+            st.dataframe(df_curr, use_container_width=True)
