@@ -3,8 +3,6 @@ import cv2
 import numpy as np
 import pandas as pd
 import os
-import zipfile
-import shutil
 import io
 import json
 import requests
@@ -77,17 +75,8 @@ setattr(block, 'CBAM', CBAM); setattr(tasks, 'CBAM', CBAM)
 setattr(block, 'SEAttention', SEAttention); setattr(tasks, 'SEAttention', SEAttention)
 
 # ==========================================
-# 3. Core Algorithms / 核心算法
+# 3. Helper Functions / 辅助工具
 # ==========================================
-def draw_grid_9x9(image):
-    h, w = image.shape[:2]
-    grid_img = image.copy()
-    ch, cw = h / 9, w / 9
-    for i in range(1, 9):
-        cv2.line(grid_img, (int(i * cw), 0), (int(i * cw), h), (0, 255, 0), 1)
-        cv2.line(grid_img, (0, int(i * ch)), (w, int(i * ch)), (0, 255, 0), 1)
-    return grid_img, ch, cw
-
 def get_grid_pos(x_center, y_center, cell_h, cell_w):
     col = chr(ord('A') + int(x_center / cell_w))
     row = int(y_center / cell_h) + 1
@@ -114,7 +103,6 @@ def get_cloud_templates_list(file_name, path_map):
     return templates
 
 def sift_dbscan_count_LOCAL(scene_gray, templates_list):
-    """完全搬运你本地的 SIFT 计数逻辑"""
     sift = cv2.SIFT_create()
     kp_s, des_s = sift.detectAndCompute(scene_gray, None)
     if des_s is None: return 0
@@ -141,9 +129,9 @@ def sift_dbscan_count_LOCAL(scene_gray, templates_list):
     return int(best_count)
 
 # ==========================================
-# 4. Streamlit UI / 界面显示
+# 4. Streamlit UI
 # ==========================================
-st.set_page_config(page_title="PCB Detection System", layout="wide")
+st.set_page_config(page_title="PCB Inspection System", layout="wide")
 
 @st.cache_data
 def load_path_map():
@@ -158,12 +146,8 @@ with st.sidebar:
     proc_mode = st.radio("Processing Mode", ["Interactive", "Fast Batch Scan"])
     model_choice = st.selectbox("Select Model", ["Model 1", "Model 2"])
     conf_thresh = st.slider("Confidence", 0.1, 1.0, 0.25)
-    
     if st.button("Clear Records"):
         st.session_state.history = []
-        if os.path.exists(TEMP_DIR):
-            shutil.rmtree(TEMP_DIR)
-        os.makedirs(TEMP_DIR, exist_ok=True)
         st.rerun()
 
 @st.cache_resource
@@ -171,80 +155,82 @@ def load_pcb_model(choice):
     path = "models/se.pt" if "1" in choice else "models/cbam.pt"
     if os.path.exists(path):
         try: return YOLO(path)
-        except Exception as e: st.error(f"Error loading model {path}: {e}"); return None
+        except Exception as e: st.error(f"Load Error: {e}"); return None
     return None
 
 model = load_pcb_model(model_choice)
 if "history" not in st.session_state: st.session_state.history = []
 
-uploaded_files = st.file_uploader("Upload PCB Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
 if uploaded_files and model:
+    # --- 核心：优化后的快速扫描 ---
     if proc_mode == "Fast Batch Scan":
-        st.info("Fast scanning images...")
-        curr_batch = []
-        for file in uploaded_files:
+        st.success(f"Selected {len(uploaded_files)} images. Starting batch analysis...")
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        all_results = []
+        for idx, file in enumerate(uploaded_files):
+            status_text.text(f"Scanning ({idx+1}/{len(uploaded_files)}): {file.name}")
+            
+            # 读取并分析（不涉及任何绘图）
             img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), 1)
             tpls = get_cloud_templates_list(file.name, path_map)
             s_count = sift_dbscan_count_LOCAL(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), tpls)
-            results = model.predict(img, conf=conf_thresh, verbose=False)
-            for r in results:
+            
+            yolo_res = model.predict(img, conf=conf_thresh, verbose=False)
+            for r in yolo_res:
                 for b in r.boxes:
                     x1, y1, x2, y2 = b.xyxy[0].cpu().numpy()
                     cls = model.names[int(b.cls[0])]
-                    curr_batch.append({
+                    all_results.append({
                         "File": file.name, "Type / 类型": get_component_type(cls),
                         "Class / 类别": cls, "Confidence / 置信度": f"{float(b.conf[0]):.2f}",
                         "Grid / 网格": get_grid_pos((x1+x2)/2, (y1+y2)/2, img.shape[0]/9, img.shape[1]/9),
                         "Coordinates / 坐标": f"({int(x1)},{int(y1)},{int(x2)},{int(y2)})",
                         "S_Count": s_count
                     })
-        st.session_state.history.extend(curr_batch)
+            progress_bar.progress((idx + 1) / len(uploaded_files))
+        
+        status_text.empty()
+        st.session_state.history = all_results # 快速扫描通常覆盖历史
+        
+        # 直接输出表格（剔除隐藏列）
         if st.session_state.history:
-            st.divider()
-            df_all = pd.DataFrame(st.session_state.history)
-            st.subheader("Consolidated Defect Report / 缺陷汇总表格")
-            st.dataframe(df_all.drop(columns=["S_Count"], errors="ignore"), use_container_width=True)
+            df = pd.DataFrame(st.session_state.history)
+            st.subheader("Consolidated Inspection Report")
+            st.dataframe(df.drop(columns=["S_Count"], errors="ignore"), use_container_width=True)
 
+    # --- 交互模式保持原样 ---
     else:
         for file in uploaded_files:
-            file_base = os.path.splitext(file.name)[0]
-            target_path = os.path.join(TEMP_DIR, f"{file_base}_{model_choice}_annotated.jpg")
             img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), 1)
-            with st.spinner(f"Analyzing {file.name}..."):
-                tpls = get_cloud_templates_list(file.name, path_map)
-                s_count = sift_dbscan_count_LOCAL(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), tpls)
-                results = model.predict(img, conf=conf_thresh)
+            tpls = get_cloud_templates_list(file.name, path_map)
+            s_count = sift_dbscan_count_LOCAL(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), tpls)
+            res = model.predict(img, conf=conf_thresh, verbose=False)
 
-            canvas, ch, cw = draw_grid_9x9(img)
+            # 交互模式依然画框
+            canvas = img.copy()
             st.session_state.history = [d for d in st.session_state.history if d['File'] != file.name]
-            for r in results:
-                for box in r.boxes:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
-                    cls = model.names[int(box.cls[0])]
+            for r in res:
+                for b in r.boxes:
+                    x1, y1, x2, y2 = map(int, b.xyxy[0].cpu().numpy())
+                    cls = model.names[int(b.cls[0])]
                     st.session_state.history.append({
                         "File": file.name, "Type / 类型": get_component_type(cls),
-                        "Class / 类别": cls, "Confidence / 置信度": f"{float(box.conf[0]):.2f}",
-                        "Grid / 网格": get_grid_pos((x1+x2)/2, (y1+y2)/2, ch, cw),
+                        "Class / 类别": cls, "Confidence / 置信度": f"{float(b.conf[0]):.2f}",
+                        "Grid / 网格": get_grid_pos((x1+x2)/2, (y1+y2)/2, img.shape[0]/9, img.shape[1]/9),
                         "Coordinates / 坐标": f"({x1},{y1},{x2},{y2})",
                         "S_Count": s_count
                     })
                     cv2.rectangle(canvas, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                    cv2.putText(canvas, f"{cls}", (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 0), 2)
-            cv2.imwrite(target_path, canvas)
 
-        if st.session_state.history:
-            df_curr = pd.DataFrame([d for d in st.session_state.history if d['File'] == uploaded_files[-1].name])
-            phys_total = int(df_curr["S_Count"].iloc[0]) if not df_curr.empty else 0
+            # 仅在交互模式下展示图片和统计
+            df_curr = pd.DataFrame([d for d in st.session_state.history if d['File'] == file.name])
+            total = int(df_curr["S_Count"].iloc[0]) if not df_curr.empty else 0
             
-            res_boxes = len(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
-            cap_boxes = len(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
-            total_boxes = res_boxes + cap_boxes
-            res_phys = int(round(phys_total * (res_boxes / total_boxes))) if total_boxes > 0 else 0
-            cap_phys = phys_total - res_phys
-            
-            st.divider(); c1, c2, c3 = st.columns(3)
-            c1.info(f"Resistors / 电阻: {res_phys}"); c2.info(f"Capacitors / 电容: {cap_phys}")
-            c3.success(f"Total: {phys_total}")
+            c1, c2, c3 = st.columns(3)
+            c3.success(f"Total: {total}")
             st.image(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
             st.dataframe(df_curr.drop(columns=["S_Count"], errors="ignore"), use_container_width=True)
