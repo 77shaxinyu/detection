@@ -9,6 +9,7 @@ import requests
 import torch
 import torch.nn as nn
 import zipfile
+import shutil
 from datetime import datetime
 from sklearn.cluster import DBSCAN
 from ultralytics import YOLO
@@ -17,7 +18,7 @@ import ultralytics.nn.modules.block as block
 from ultralytics.nn.modules.conv import Conv
 
 # ==========================================
-# 1. 系统初始化
+# 1. System Initialization / 系统初始化
 # ==========================================
 TEMP_DIR = "temp_results"
 GITHUB_API_BASE = "https://api.github.com/repos/77shaxinyu/detection/contents/dataset_empty/"
@@ -26,7 +27,7 @@ if not os.path.exists(TEMP_DIR):
     os.makedirs(TEMP_DIR, exist_ok=True)
 
 # ==========================================
-# 2. YOLO 模型组件注入
+# 2. Custom Modules Injection / 模块注入
 # ==========================================
 class CBAM(nn.Module):
     def __init__(self, c1, ratio=16, kernel_size=7):
@@ -77,13 +78,13 @@ class C2f_Custom(nn.Module):
             return self.attn(self.cv2(torch.cat(y, 1)))
 
 block.C2f = tasks.C2f = C2f_Custom
-setattr(block, 'CBAM', CBAM)
-setattr(tasks, 'CBAM', CBAM)
-setattr(block, 'SEAttention', SEAttention)
-setattr(tasks, 'SEAttention', SEAttention)
+setattr(block, "CBAM", CBAM)
+setattr(tasks, "CBAM", CBAM)
+setattr(block, "SEAttention", SEAttention)
+setattr(tasks, "SEAttention", SEAttention)
 
 # ==========================================
-# 3. 核心算法 (SIFT + DBSCAN)
+# 3. Core SIFT Logic / 本地算法逻辑
 # ==========================================
 def sift_count_logic_LOCAL(scene_gray, templates_list):
     sift = cv2.SIFT_create()
@@ -117,10 +118,19 @@ def sift_count_logic_LOCAL(scene_gray, templates_list):
     return int(best_count)
 
 # ==========================================
-# 4. 辅助函数
+# 4. Helper Functions / 辅助工具
 # ==========================================
+def draw_grid_9x9(image):
+    h, w = image.shape[:2]
+    grid_img = image.copy()
+    ch, cw = h / 9, w / 9
+    for i in range(1, 9):
+        cv2.line(grid_img, (int(i * cw), 0), (int(i * cw), h), (0, 255, 0), 1)
+        cv2.line(grid_img, (0, int(i * ch)), (w, int(i * ch)), (0, 255, 0), 1)
+    return grid_img, ch, cw
+
 def get_grid_pos(x_center, y_center, cell_h, cell_w):
-    col = chr(ord('A') + int(x_center / cell_w))
+    col = chr(ord("A") + int(x_center / cell_w))
     row = int(y_center / cell_h) + 1
     return f"{col}{row}"
 
@@ -150,7 +160,7 @@ def get_cloud_templates_list(file_name, path_map):
     return templates
 
 # ==========================================
-# 5. UI 界面逻辑
+# 5. UI Logic / 界面逻辑
 # ==========================================
 st.set_page_config(page_title="PCB Inspection System", layout="wide")
 
@@ -189,11 +199,11 @@ model = load_pcb_model(model_choice)
 if "history" not in st.session_state:
     st.session_state.history = []
 
-uploaded_files = st.file_uploader("Upload Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload PCB Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
 if uploaded_files and model:
     if proc_mode == "Fast Batch Scan":
-        st.success("Batch Scanning Started")
+        st.info("Fast batch scanning...")
         progress_bar = st.progress(0)
         all_results = []
         for idx, file in enumerate(uploaded_files):
@@ -220,47 +230,54 @@ if uploaded_files and model:
             tpls = get_cloud_templates_list(file.name, path_map)
             s_count = sift_count_logic_LOCAL(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), tpls)
             res = model.predict(img, conf=conf_thresh, verbose=False)
-            canvas = img.copy()
+            
+            # --- 找回 9x9 网格绘制 ---
+            canvas, ch, cw = draw_grid_9x9(img)
+            
             st.session_state.history = [d for d in st.session_state.history if d["File"] != file.name]
             for r in res:
                 for b in r.boxes:
                     x1, y1, x2, y2 = map(int, b.xyxy[0].cpu().numpy())
                     cls = model.names[int(b.cls[0])]
+                    pos = get_grid_pos((x1+x2)/2, (y1+y2)/2, ch, cw)
                     st.session_state.history.append({
                         "File": file.name, "Type / 类型": get_component_type(cls),
                         "Class / 类别": cls, "Confidence / 置信度": f"{float(b.conf[0]):.2f}",
-                        "Grid / 网格": get_grid_pos((x1+x2)/2, (y1+y2)/2, img.shape[0]/9, img.shape[1]/9),
+                        "Grid / 网格": pos,
                         "Coordinates / 坐标": f"({x1},{y1},{x2},{y2})",
                         "S_Count": s_count
                     })
+                    # --- 找回画框与文字标注 ---
                     cv2.rectangle(canvas, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                    label = f"{cls} {pos}"
+                    cv2.putText(canvas, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 2)
             st.image(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
 
     if st.session_state.history:
-        df = pd.DataFrame(st.session_state.history)
+        df_all = pd.DataFrame(st.session_state.history)
         last_file = uploaded_files[-1].name
-        df_curr = df[df["File"] == last_file]
+        df_curr = df_all[df_all["File"] == last_file]
         
-        # 统计数据处理
-        phys_total = int(df_curr["S_Count"].iloc[0]) if not df_curr.empty else 0
-        res_boxes = len(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
-        cap_boxes = len(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
-        total_boxes = res_boxes + cap_boxes
-        res_phys = int(round(phys_total * (res_boxes / total_boxes))) if total_boxes > 0 else 0
-        cap_phys = phys_total - res_phys
+        if proc_mode != "Fast Batch Scan":
+            phys_total = int(df_curr["S_Count"].iloc[0]) if not df_curr.empty else 0
+            res_boxes = len(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
+            cap_boxes = len(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
+            total_boxes = res_boxes + cap_boxes
+            res_phys = int(round(phys_total * (res_boxes / total_boxes))) if total_boxes > 0 else 0
+            cap_phys = phys_total - res_phys
 
-        st.divider()
-        c1, c2, c3 = st.columns(3)
-        c1.info(f"Resistors / 电阻: {res_phys}")
-        c2.info(f"Capacitors / 电容: {cap_phys}")
-        c3.success(f"Total: {phys_total}")
+            st.divider()
+            c1, c2, c3 = st.columns(3)
+            c1.info(f"Resistors / 电阻: {res_phys}")
+            c2.info(f"Capacitors / 电容: {cap_phys}")
+            c3.success(f"Total: {phys_total}")
         
-        # 显示表格并剔除隐藏列
-        st.dataframe(df.drop(columns=["S_Count"], errors="ignore"), use_container_width=True)
+        st.subheader("Inspection Report")
+        display_df = df_all.drop(columns=["S_Count"], errors="ignore")
+        st.dataframe(display_df, use_container_width=True)
 
-        # 导出 ZIP 功能
-        csv_data = df.drop(columns=["S_Count"], errors="ignore").to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+        csv_data = display_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zf:
-            zf.writestr("report.csv", csv_data)
-        st.download_button("Download Result ZIP", data=zip_buffer.getvalue(), file_name="results.zip")
+            zf.writestr("inspection_report.csv", csv_data)
+        st.download_button("Download ZIP", data=zip_buffer.getvalue(), file_name="results.zip", use_container_width=True)
