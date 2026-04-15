@@ -279,7 +279,7 @@ if uploaded_files and model:
             c1, c2, c3 = st.columns(3)
             c1.info(f"Resistors / 电阻: {res_phys}")
             c2.info(f"Capacitors / 电容: {cap_phys}")
-            c3.success(f"Physical Total (SIFT): {phys_total}")
+            c3.success(f"Total: {phys_total}")
 
             display_path = os.path.join(TEMP_DIR, f"{os.path.splitext(last_file_name)[0]}_{model_choice}_annotated.jpg")
             if os.path.exists(display_path):
