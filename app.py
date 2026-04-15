@@ -11,7 +11,6 @@ import torch.nn as nn
 import zipfile
 import shutil
 from datetime import datetime
-from sklearn.cluster import DBSCAN
 from ultralytics import YOLO
 import ultralytics.nn.tasks as tasks
 import ultralytics.nn.modules.block as block
@@ -75,7 +74,7 @@ setattr(block, 'SEAttention', SEAttention)
 setattr(tasks, 'SEAttention', SEAttention)
 
 # ==========================================
-# 2. 核心算法逻辑 (ORB/SIFT 级联定位)
+# 2. 核心算法逻辑 (定位与检测)
 # ==========================================
 def draw_grid_9x9(image):
     h, w = image.shape[:2]
@@ -101,7 +100,14 @@ def get_alignment_matrix(tpl_img, test_img, mode="ORB"):
         return None
 
     matches = matcher.knnMatch(des1, des2, k=2)
-    good = [m for m_pair in matches if len(m_pair) == 2 and m_pair[0].distance < ratio * m_pair[1].distance]
+    
+    # 显式循环 Ratio Test 以防止作用域错误
+    good = []
+    for m_pair in matches:
+        if len(m_pair) == 2:
+            m, n = m_pair
+            if m.distance < ratio * n.distance:
+                good.append(m)
     
     if len(good) >= 8:
         src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
@@ -166,7 +172,7 @@ def get_cloud_templates(file_name, path_map):
     return templates
 
 # ==========================================
-# 4. Streamlit UI 界面
+# 4. UI 界面逻辑
 # ==========================================
 st.set_page_config(page_title="PCB Inspection System", layout="wide")
 
@@ -178,6 +184,9 @@ def load_path_map():
     return {}
 
 path_map = load_path_map()
+TEMP_DIR = "temp_results"
+if not os.path.exists(TEMP_DIR):
+    os.makedirs(TEMP_DIR, exist_ok=True)
 
 with st.sidebar:
     st.header("Configuration")
@@ -206,14 +215,14 @@ model = load_pcb_model(model_choice)
 if "history" not in st.session_state:
     st.session_state.history = []
 
-uploaded_files = st.file_uploader("Upload PCB Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
 if uploaded_files and model:
     for f in uploaded_files:
         img_bgr = cv2.imdecode(np.frombuffer(f.read(), np.uint8), 1)
         tpls = get_cloud_templates(f.name, path_map)
         
-        with st.spinner(f"Analyzing {f.name} with {algo_choice}..."):
+        with st.spinner(f"Analyzing {f.name}..."):
             final_boxes = []
             if tpls:
                 M = get_alignment_matrix(tpls[0], img_bgr, mode=algo_choice)
@@ -256,16 +265,14 @@ if uploaded_files and model:
         
         if proc_mode == "Interactive":
             st.image(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
-            
             df_curr = df_all[df_all["File"] == uploaded_files[-1].name]
-            res_count = len(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
-            cap_count = len(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
-            
+            r_c = len(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
+            c_c = len(df_curr[df_curr["Type / 类型"].str.contains("Capacitor")])
             st.divider()
-            c1, c2, c3 = st.columns(3)
-            c1.info(f"Resistors / 电阻: {res_count}")
-            c2.info(f"Capacitors / 电容: {cap_count}")
-            c3.success(f"Total: {res_count + cap_count}")
+            col1, col2, col3 = st.columns(3)
+            col1.info(f"Resistors / 电阻: {r_c}")
+            col2.info(f"Capacitors / 电容: {c_c}")
+            col3.success(f"Total: {r_c + c_c}")
 
         st.subheader("Inspection Report")
         st.dataframe(df_all, use_container_width=True)
