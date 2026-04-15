@@ -17,7 +17,7 @@ import ultralytics.nn.modules.block as block
 from ultralytics.nn.modules.conv import Conv
 
 # ==========================================
-# 1. 模型架构定义 (SE/CBAM)
+# 1. 模型架构定义
 # ==========================================
 class CBAM(nn.Module):
     def __init__(self, c1, ratio=16, kernel_size=7):
@@ -74,7 +74,7 @@ setattr(block, 'SEAttention', SEAttention)
 setattr(tasks, 'SEAttention', SEAttention)
 
 # ==========================================
-# 2. 核心算法逻辑 (定位与检测)
+# 2. 核心算法逻辑
 # ==========================================
 def draw_grid_9x9(image):
     h, w = image.shape[:2]
@@ -84,24 +84,22 @@ def draw_grid_9x9(image):
         cv2.line(grid_img, (0, int(i * h / 9)), (w, int(i * h / 9)), (0, 255, 0), 2)
     return grid_img, h / 9, w / 9
 
-def get_alignment_matrix(tpl_img, test_img, mode="ORB"):
-    if mode == "ORB":
+def get_alignment_matrix(tpl_img, test_img, algo_name):
+    # 映射算法逻辑
+    if "Algorithm 2" in algo_name: # 原 ORB
         detector = cv2.ORB_create(nfeatures=2000)
         matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
         ratio = 0.85
-    else:
+    else: # 原 SIFT
         detector = cv2.SIFT_create()
         matcher = cv2.BFMatcher()
         ratio = 0.75
 
     kp1, des1 = detector.detectAndCompute(cv2.cvtColor(tpl_img, cv2.COLOR_BGR2GRAY), None)
     kp2, des2 = detector.detectAndCompute(cv2.cvtColor(test_img, cv2.COLOR_BGR2GRAY), None)
-    if des1 is None or des2 is None:
-        return None
+    if des1 is None or des2 is None: return None
 
     matches = matcher.knnMatch(des1, des2, k=2)
-    
-    # 显式循环 Ratio Test 以防止作用域错误
     good = []
     for m_pair in matches:
         if len(m_pair) == 2:
@@ -132,15 +130,11 @@ def get_roi_detect(img, M, model, conf):
             for r_obj in res:
                 for b in r_obj.boxes:
                     bx1, by1, bx2, by2 = b.xyxy[0].cpu().numpy()
-                    final_boxes.append({
-                        "xyxy": [bx1 + rx, by1 + ry, bx2 + rx, by2 + ry], 
-                        "cls": int(b.cls[0]), 
-                        "conf": float(b.conf[0])
-                    })
+                    final_boxes.append({"xyxy": [bx1 + rx, by1 + ry, bx2 + rx, by2 + ry], "cls": int(b.cls[0]), "conf": float(b.conf[0])})
     return final_boxes
 
 # ==========================================
-# 3. 辅助函数
+# 3. 辅助功能
 # ==========================================
 def get_grid_pos(x_center, y_center, cell_h, cell_w):
     col = chr(ord("A") + int(x_center / cell_w))
@@ -148,15 +142,13 @@ def get_grid_pos(x_center, y_center, cell_h, cell_w):
     return f"{col}{row}"
 
 def get_component_type(class_name):
-    if "resistor" in class_name.lower():
-        return "Resistor / 电阻"
+    if "resistor" in class_name.lower(): return "Resistor / 电阻"
     return "Capacitor / 电容"
 
 @st.cache_data
 def get_cloud_templates(file_name, path_map):
     rel_path = path_map.get(file_name)
-    if not rel_path:
-        return []
+    if not rel_path: return []
     api_url = f"https://api.github.com/repos/77shaxinyu/detection/contents/dataset_empty/{rel_path.replace('\\', '/')}"
     templates = []
     try:
@@ -165,67 +157,60 @@ def get_cloud_templates(file_name, path_map):
             if item["name"].lower().endswith((".jpg", ".png", ".jpeg")):
                 data = requests.get(item["download_url"]).content
                 img = cv2.imdecode(np.frombuffer(data, np.uint8), 1)
-                if img is not None:
-                    templates.append(img)
-    except Exception:
-        pass
+                if img is not None: templates.append(img)
+    except Exception: pass
     return templates
 
 # ==========================================
-# 4. UI 界面逻辑
+# 4. Streamlit UI 界面 (双语版)
 # ==========================================
-st.set_page_config(page_title="PCB Inspection System", layout="wide")
+st.set_page_config(page_title="PCB Inspection System / 巡检系统", layout="wide")
 
 @st.cache_data
 def load_path_map():
     if os.path.exists("path_index.json"):
-        with open("path_index.json", "r", encoding="utf-8") as f:
-            return json.load(f)
+        with open("path_index.json", "r", encoding="utf-8") as f: return json.load(f)
     return {}
 
 path_map = load_path_map()
 TEMP_DIR = "temp_results"
-if not os.path.exists(TEMP_DIR):
-    os.makedirs(TEMP_DIR, exist_ok=True)
+if not os.path.exists(TEMP_DIR): os.makedirs(TEMP_DIR, exist_ok=True)
 
 with st.sidebar:
-    st.header("Configuration")
-    proc_mode = st.radio("Processing Mode", ["Interactive", "Fast Batch Scan"])
-    model_choice = st.selectbox("DL Model", ["Model 1 (SE)", "Model 2 (CBAM)"])
-    algo_choice = st.selectbox("Alignment Algorithm", ["ORB", "SIFT"])
-    conf_thresh = st.slider("Confidence", 0.1, 1.0, 0.25)
-    if st.button("Clear Records"):
+    st.header("Configuration / 配置")
+    proc_mode = st.radio("Processing Mode / 处理模式", ["Interactive / 交互预览", "Fast Batch Scan / 快速批量扫描"])
+    model_choice = st.selectbox("DL Model / 检测模型", ["Model 1 / 模型 1", "Model 2 / 模型 2"])
+    algo_choice = st.selectbox("Alignment Algorithm / 定位算法", ["Algorithm 1 / 算法 1", "Algorithm 2 / 算法 2"])
+    conf_thresh = st.slider("Confidence / 置信度", 0.1, 1.0, 0.25)
+    if st.button("Clear Records / 清空记录"):
         st.session_state.history = []
-        if os.path.exists(TEMP_DIR):
-            shutil.rmtree(TEMP_DIR)
+        if os.path.exists(TEMP_DIR): shutil.rmtree(TEMP_DIR)
         os.makedirs(TEMP_DIR, exist_ok=True)
         st.rerun()
 
 @st.cache_resource
 def load_pcb_model(choice):
-    path = "models/se.pt" if "SE" in choice else "models/cbam.pt"
+    # Model 1 -> se.pt, Model 2 -> cbam.pt
+    path = "models/se.pt" if "1" in choice else "models/cbam.pt"
     if os.path.exists(path):
-        try:
-            return YOLO(path)
-        except Exception:
-            return None
+        try: return YOLO(path)
+        except Exception: return None
     return None
 
 model = load_pcb_model(model_choice)
-if "history" not in st.session_state:
-    st.session_state.history = []
+if "history" not in st.session_state: st.session_state.history = []
 
-uploaded_files = st.file_uploader("Upload Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload Images / 上传图片", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
 if uploaded_files and model:
     for f in uploaded_files:
         img_bgr = cv2.imdecode(np.frombuffer(f.read(), np.uint8), 1)
         tpls = get_cloud_templates(f.name, path_map)
         
-        with st.spinner(f"Analyzing {f.name}..."):
+        with st.spinner(f"Analyzing / 正在分析: {f.name}..."):
             final_boxes = []
             if tpls:
-                M = get_alignment_matrix(tpls[0], img_bgr, mode=algo_choice)
+                M = get_alignment_matrix(tpls[0], img_bgr, algo_choice)
                 if M is not None:
                     final_boxes = get_roi_detect(img_bgr, M, model, conf_thresh)
             
@@ -233,11 +218,7 @@ if uploaded_files and model:
                 res = model.predict(img_bgr, conf=conf_thresh, verbose=False)
                 for r in res:
                     for b in r.boxes:
-                        final_boxes.append({
-                            "xyxy": b.xyxy[0].cpu().numpy(), 
-                            "cls": int(b.cls[0]), 
-                            "conf": float(b.conf[0])
-                        })
+                        final_boxes.append({"xyxy": b.xyxy[0].cpu().numpy(), "cls": int(b.cls[0]), "conf": float(b.conf[0])})
 
         canvas, ch, cw = draw_grid_9x9(img_bgr)
         st.session_state.history = [d for d in st.session_state.history if d["File"] != f.name]
@@ -251,19 +232,19 @@ if uploaded_files and model:
                 "File": f.name,
                 "Type / 类型": get_component_type(cls_name),
                 "Class / 类别": cls_name,
-                "Confidence": f"{box['conf']:.2f}",
+                "Confidence / 置信度": f"{box['conf']:.2f}",
                 "Grid / 网格": pos,
-                "Coordinates": f"({x1},{y1},{x2},{y2})"
+                "Coordinates / 坐标": f"({x1},{y1},{x2},{y2})"
             })
             
-            if proc_mode == "Interactive":
+            if "Interactive" in proc_mode:
                 cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 0, 255), 2)
                 cv2.putText(canvas, f"{cls_name} {pos}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 2)
 
     if st.session_state.history:
         df_all = pd.DataFrame(st.session_state.history)
         
-        if proc_mode == "Interactive":
+        if "Interactive" in proc_mode:
             st.image(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
             df_curr = df_all[df_all["File"] == uploaded_files[-1].name]
             r_c = len(df_curr[df_curr["Type / 类型"].str.contains("Resistor")])
@@ -272,13 +253,13 @@ if uploaded_files and model:
             col1, col2, col3 = st.columns(3)
             col1.info(f"Resistors / 电阻: {r_c}")
             col2.info(f"Capacitors / 电容: {c_c}")
-            col3.success(f"Total: {r_c + c_c}")
+            col3.success(f"Total / 总计: {r_c + c_c}")
 
-        st.subheader("Inspection Report")
+        st.subheader("Inspection Report / 巡检报告")
         st.dataframe(df_all, use_container_width=True)
 
         csv_data = df_all.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zf:
             zf.writestr("report.csv", csv_data)
-        st.download_button("Download Report ZIP", data=zip_buffer.getvalue(), file_name="results.zip", use_container_width=True)
+        st.download_button("Download Report ZIP / 下载报告压缩包", data=zip_buffer.getvalue(), file_name="results.zip", use_container_width=True)
