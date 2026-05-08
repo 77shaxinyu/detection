@@ -8,18 +8,16 @@ import json
 import requests
 import torch
 import torch.nn as nn
-import zipfile
-import shutil
-import time  # 性能统计
+import time
 from datetime import datetime
 from ultralytics import YOLO
 import ultralytics.nn.tasks as tasks
 import ultralytics.nn.modules.block as block
 from ultralytics.nn.modules.conv import Conv
-from docx import Document  # Word 导出
+from docx import Document
 
 # ==========================================
-# 1. 模型架构定义 (PCB 缺陷检测专用注意力模块)
+# 1. 模型架构定义 (保持底层支持，防止加载报错)
 # ==========================================
 class CBAM(nn.Module):
     def __init__(self, c1, ratio=16, kernel_size=7):
@@ -64,12 +62,9 @@ class C2f_Custom(nn.Module):
     def forward(self, x):
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.m)
-        try:
-            return self.cbam(self.cv2(torch.cat(y, 1)))
-        except Exception:
-            return self.attn(self.cv2(torch.cat(y, 1)))
+        try: return self.cbam(self.cv2(torch.cat(y, 1)))
+        except Exception: return self.attn(self.cv2(torch.cat(y, 1)))
 
-# 注册 YOLO 组件
 block.C2f = tasks.C2f = C2f_Custom
 setattr(block, 'CBAM', CBAM)
 setattr(tasks, 'CBAM', CBAM)
@@ -77,12 +72,9 @@ setattr(block, 'SEAttention', SEAttention)
 setattr(tasks, 'SEAttention', SEAttention)
 
 # ==========================================
-# 2. 核心算法逻辑 (特征对齐与性能提取)
+# 2. 核心性能分析逻辑
 # ==========================================
-def get_alignment_matrix(tpl_img, test_img, algo_name):
-    """
-    执行 SIFT/ORB 对齐并捕获底层特征指标
-    """
+def get_alignment_metrics(tpl_img, test_img, algo_name):
     metrics = {}
     t_start = time.perf_counter()
     
@@ -95,17 +87,15 @@ def get_alignment_matrix(tpl_img, test_img, algo_name):
         matcher = cv2.BFMatcher()
         ratio = 0.75
 
-    # A) 特征提取
     kp1, des1 = detector.detectAndCompute(cv2.cvtColor(tpl_img, cv2.COLOR_BGR2GRAY), None)
     kp2, des2 = detector.detectAndCompute(cv2.cvtColor(test_img, cv2.COLOR_BGR2GRAY), None)
     t_detect = time.perf_counter()
     
-    metrics['kp_count'] = len(kp2)
-    metrics['detect_time_ms'] = (t_detect - t_start) * 1000
+    metrics['Keypoints'] = len(kp2)
+    metrics['Det_Time_ms'] = round((t_detect - t_start) * 1000, 2)
 
-    if des1 is None or des2 is None: return None, metrics
+    if des1 is None or des2 is None: return metrics
 
-    # B) 鲁棒性匹配 [修复了 m 变量定义错误]
     t_match_start = time.perf_counter()
     matches = matcher.knnMatch(des1, des2, k=2)
     good = []
@@ -116,229 +106,105 @@ def get_alignment_matrix(tpl_img, test_img, algo_name):
                 good.append(m)
     t_match_end = time.perf_counter()
     
-    metrics['good_matches'] = len(good)
-    metrics['match_time_ms'] = (t_match_end - t_match_start) * 1000
+    metrics['Match_Time_ms'] = round((t_match_end - t_match_start) * 1000, 2)
+    metrics['Good_Matches'] = len(good)
 
-    # C) 单应性矩阵计算 (RANSAC)
     if len(good) >= 8:
         src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
         dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
         M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-        
         if mask is not None:
-            metrics['inlier_ratio'] = np.sum(mask) / len(good)
-            metrics['match_accuracy'] = np.sum(mask) / len(matches) if len(matches) > 0 else 0
-        return M, metrics
-        
-    return None, metrics
-
-def get_roi_detect(img, M, model, conf):
-    h, w = img.shape[:2]
-    roi_defs = [{"box": [[0, 0], [0, h], [w * 0.4, h], [w * 0.4, 0]]},
-                {"box": [[w * 0.6, 0], [w * 0.6, h], [w, h], [w, 0]]}]
-    final_boxes = []
-    for r in roi_defs:
-        pts = np.float32(r["box"]).reshape(-1, 1, 2)
-        dst = cv2.perspectiveTransform(pts, M)
-        rx, ry, rw, rh = cv2.boundingRect(dst)
-        rx, ry = max(0, rx), max(0, ry)
-        crop = img[ry:ry + rh, rx:rx + rw]
-        if crop.size > 0:
-            res = model.predict(crop, conf=conf, verbose=False)
-            for r_obj in res:
-                for b in r_obj.boxes:
-                    bx1, by1, bx2, by2 = b.xyxy[0].cpu().numpy()
-                    final_boxes.append({"xyxy": [bx1 + rx, by1 + ry, bx2 + rx, by2 + ry], 
-                                      "cls": int(b.cls[0]), "conf": float(b.conf[0])})
-    return final_boxes
-
-def draw_grid_9x9(image):
-    h, w = image.shape[:2]
-    grid_img = image.copy()
-    for i in range(1, 9):
-        cv2.line(grid_img, (int(i * w / 9), 0), (int(i * w / 9), h), (0, 255, 0), 2)
-        cv2.line(grid_img, (0, int(i * h / 9)), (w, int(i * h / 9)), (0, 255, 0), 2)
-    return grid_img, h / 9, w / 9
-
-# ==========================================
-# 3. 辅助功能 (Word 一键导出报告)
-# ==========================================
-def get_grid_pos(x_center, y_center, cell_h, cell_w):
-    col = chr(ord("A") + int(x_center / cell_w))
-    row = int(y_center / cell_h) + 1
-    return f"{col}{row}"
-
-def get_component_type(class_name):
-    if "resistor" in class_name.lower(): return "Resistor / 电阻"
-    return "Capacitor / 电容"
+            metrics['Inlier_Ratio'] = round(np.sum(mask) / len(good), 4)
+            metrics['Match_Acc'] = f"{round((np.sum(mask) / len(matches)) * 100, 2)}%" if len(matches) > 0 else "0%"
+    return metrics
 
 @st.cache_data
 def get_cloud_templates(file_name, path_map):
-    rel_path = path_map.get(file_name)
-    if not rel_path: return []
+    # 提取纯文件名用于路径映射
+    base_name = os.path.basename(file_name)
+    rel_path = path_map.get(base_name)
+    if not rel_path: return None
     api_url = f"https://api.github.com/repos/77shaxinyu/detection/contents/dataset_empty/{rel_path.replace('\\', '/')}"
-    templates = []
     try:
         res = requests.get(api_url, timeout=5).json()
         for item in res:
             if item["name"].lower().endswith((".jpg", ".png", ".jpeg")):
                 data = requests.get(item["download_url"]).content
-                img = cv2.imdecode(np.frombuffer(data, np.uint8), 1)
-                if img is not None: templates.append(img)
-    except Exception: pass
-    return templates
-
-def export_to_word(history_list):
-    """
-    基于历史数据生成 Word 文档
-    """
-    doc = Document()
-    doc.add_heading('PCB Inspection Performance Report', 0)
-    
-    # 指标说明
-    doc.add_heading('1. Algorithm Performance Metrics', level=1)
-    table = doc.add_table(rows=1, cols=6)
-    table.style = 'Table Grid'
-    hdr = table.rows[0].cells
-    hdr[0].text, hdr[1].text, hdr[2].text = 'Filename', 'Keypoints', 'Match Acc'
-    hdr[3].text, hdr[4].text, hdr[5].text = 'Inlier Ratio', 'Detect Time(ms)', 'Match Time(ms)'
-
-    # 结果明细
-    doc.add_heading('2. Defect Detection Details', level=1)
-    table_det = doc.add_table(rows=1, cols=4)
-    table_det.style = 'Table Grid'
-    hdr_det = table_det.rows[0].cells
-    hdr_det[0].text, hdr_det[1].text = 'Filename', 'Grid'
-    hdr_det[2].text, hdr_det[3].text = 'Class', 'Confidence'
-
-    unique_files = {}
-    for item in history_list:
-        row_d = table_det.add_row().cells
-        row_d[0].text = str(item['File'])
-        row_d[1].text = str(item['Grid / 网格'])
-        row_d[2].text = str(item['Class / 类别'])
-        row_d[3].text = str(item['Confidence / 置信度'])
-        if item['File'] not in unique_files: unique_files[item['File']] = item
-
-    for f, d in unique_files.items():
-        row_p = table.add_row().cells
-        row_p[0].text = str(f)
-        row_p[1].text = str(d.get('KP_Count', 'N/A'))
-        row_p[2].text = str(d.get('Match_Acc', 'N/A'))
-        row_p[3].text = str(d.get('Inlier_Ratio', 'N/A'))
-        row_p[4].text = str(d.get('Det_Time', 'N/A'))
-        row_p[5].text = str(d.get('Match_Time', 'N/A'))
-
-    bio = io.BytesIO()
-    doc.save(bio)
-    return bio.getvalue()
-
-# ==========================================
-# 4. Streamlit UI 界面 (双语版)
-# ==========================================
-st.set_page_config(page_title="PCB Inspection System", layout="wide")
-
-@st.cache_data
-def load_path_map():
-    if os.path.exists("path_index.json"):
-        with open("path_index.json", "r", encoding="utf-8") as f: return json.load(f)
-    return {}
-
-path_map = load_path_map()
-TEMP_DIR = "temp_results"
-if not os.path.exists(TEMP_DIR): os.makedirs(TEMP_DIR, exist_ok=True)
-
-with st.sidebar:
-    st.header("Configuration")
-    proc_mode = st.radio("Mode", ["Interactive", "Fast Batch Scan"])
-    model_choice = st.selectbox("Model", ["Model 1 (SE)", "Model 2 (CBAM)"])
-    algo_choice = st.selectbox("Algorithm", ["Algorithm 1 (SIFT)", "Algorithm 2 (ORB)"])
-    conf_thresh = st.slider("Confidence", 0.1, 1.0, 0.25)
-    if st.button("Clear History"):
-        st.session_state.history = []
-        if os.path.exists(TEMP_DIR): shutil.rmtree(TEMP_DIR)
-        os.makedirs(TEMP_DIR, exist_ok=True)
-        st.rerun()
-
-@st.cache_resource
-def load_pcb_model(choice):
-    path = "models/se.pt" if "SE" in choice else "models/cbam.pt"
-    if os.path.exists(path):
-        try: return YOLO(path)
-        except Exception: return None
+                return cv2.imdecode(np.frombuffer(data, np.uint8), 1)
+    except: pass
     return None
 
-model = load_pcb_model(model_choice)
-if "history" not in st.session_state: st.session_state.history = []
+# ==========================================
+# 3. Streamlit UI (多级目录全扫描版)
+# ==========================================
+st.set_page_config(page_title="Deep Folder Scanner", layout="wide")
 
-uploaded_files = st.file_uploader("Upload Images", type=["jpg", "png"], accept_multiple_files=True)
+if os.path.exists("path_index.json"):
+    with open("path_index.json", "r", encoding="utf-8") as f: path_map = json.load(f)
+else: path_map = {}
 
-if uploaded_files and model:
-    for f in uploaded_files:
-        img_bgr = cv2.imdecode(np.frombuffer(f.read(), np.uint8), 1)
-        tpls = get_cloud_templates(f.name, path_map)
+with st.sidebar:
+    st.header("Algorithm Control")
+    algo_choice = st.selectbox("Algorithm", ["Algorithm 1 (SIFT)", "Algorithm 2 (ORB)"])
+    if st.button("Reset Records"):
+        st.session_state.perf_history = []
+        st.rerun()
+
+if "perf_history" not in st.session_state: st.session_state.history = []
+
+st.title("📂 PCB Multilevel Folder Performance Scanner")
+st.warning("⚠️ **重要操作说明**：请直接将**整个父文件夹**拖入下方的上传框，或点击上传后进入该文件夹，按 **Ctrl+A** 全选所有内容（包括子文件夹）。Streamlit 会自动展平所有子目录下的图片。")
+
+# 核心：允许批量上传，这是扫描多目录图片的唯一途径
+uploaded_files = st.file_uploader("Drop Parent Folder / 拖入整个文件夹", type=["jpg", "png"], accept_multiple_files=True)
+
+if uploaded_files:
+    if st.button("Start Global Scan / 开始全目录扫描"):
+        progress_bar = st.progress(0)
+        st.session_state.perf_history = [] # 每次扫描清空旧数据
         
-        with st.spinner(f"Analyzing: {f.name}..."):
-            final_boxes = []
-            perf = {}
-            if tpls:
-                # 核心：解包矩阵与性能指标
-                M, perf = get_alignment_matrix(tpls[0], img_bgr, algo_choice)
-                if M is not None:
-                    final_boxes = get_roi_detect(img_bgr, M, model, conf_thresh)
+        for i, f in enumerate(uploaded_files):
+            # 将文件读取为 OpenCV 格式
+            file_bytes = np.frombuffer(f.read(), np.uint8)
+            img_bgr = cv2.imdecode(file_bytes, 1)
             
-            if not final_boxes:
-                res = model.predict(img_bgr, conf=conf_thresh, verbose=False)
-                for r in res:
-                    for b in r.boxes:
-                        final_boxes.append({"xyxy": b.xyxy[0].cpu().numpy(), 
-                                          "cls": int(b.cls[0]), "conf": float(b.conf[0])})
-
-        canvas, ch, cw = draw_grid_9x9(img_bgr)
-        st.session_state.history = [d for d in st.session_state.history if d["File"] != f.name]
-        
-        for box in final_boxes:
-            x1, y1, x2, y2 = map(int, box["xyxy"])
-            cls_name = model.names[box["cls"]]
-            pos = get_grid_pos((x1+x2)/2, (y1+y2)/2, ch, cw)
+            # 获取对应的模板
+            tpl = get_cloud_templates(f.name, path_map)
             
-            st.session_state.history.append({
-                "File": f.name,
-                "Type / 类型": get_component_type(cls_name),
-                "Class / 类别": cls_name,
-                "Confidence / 置信度": f"{box['conf']:.2f}",
-                "Grid / 网格": pos,
-                "Coordinates / 坐标": f"({x1},{y1},{x2},{y2})",
-                # 隐藏记录 Word 专用指标
-                "KP_Count": perf.get('kp_count', 'N/A'),
-                "Match_Acc": f"{perf.get('match_accuracy', 0)*100:.2f}%" if 'match_accuracy' in perf else 'N/A',
-                "Inlier_Ratio": f"{perf.get('inlier_ratio', 0):.4f}" if 'inlier_ratio' in perf else 'N/A',
-                "Det_Time": f"{perf.get('detect_time_ms', 0):.2f}",
-                "Match_Time": f"{perf.get('match_time_ms', 0):.2f}"
-            })
+            if tpl is not None:
+                perf = get_alignment_metrics(tpl, img_bgr, algo_choice)
+                perf['Filename'] = f.name # 保留相对路径名
+                perf['Algorithm'] = algo_choice
+                st.session_state.perf_history.append(perf)
             
-            if "Interactive" in proc_mode:
-                cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                cv2.putText(canvas, f"{cls_name} {pos}", (x1, y1 - 10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 2)
+            progress_bar.progress((i + 1) / len(uploaded_files))
+        st.success(f"Global Scan Complete! Processed {len(st.session_state.perf_history)} images from all subdirectories.")
 
-    if st.session_state.history:
-        df_all = pd.DataFrame(st.session_state.history)
-        if "Interactive" in proc_mode:
-            st.image(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
-        
-        st.subheader("Inspection Report")
-        # 显示时不展示底层参数
-        display_cols = ["File", "Type / 类型", "Class / 类别", "Confidence / 置信度", "Grid / 网格"]
-        st.dataframe(df_all[display_cols], use_container_width=True)
+# 只输出 Algorithm Performance Metrics
+if "perf_history" in st.session_state and st.session_state.perf_history:
+    st.subheader("📊 Algorithm Performance Metrics (All Subdirectories)")
+    df = pd.DataFrame(st.session_state.perf_history)
+    
+    # 定义展示列
+    target_cols = ['Filename', 'Algorithm', 'Keypoints', 'Good_Matches', 'Match_Acc', 'Inlier_Ratio', 'Det_Time_ms', 'Match_Time_ms']
+    df = df[[c for c in target_cols if c in df.columns]]
+    
+    st.dataframe(df, use_container_width=True)
 
-        col1, col2 = st.columns(2)
-        # CSV 导出
-        csv = df_all.to_csv(index=False).encode('utf-8-sig')
-        col1.download_button("Download CSV", csv, "report.csv", "text/csv", use_container_width=True)
-        
-        # Word 一键导出
-        word_doc = export_to_word(st.session_state.history)
-        col2.download_button("Export Word Analysis", word_doc, "PCB_Report.docx", 
-                           "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
-                           use_container_width=True)
+    # 导出逻辑
+    col1, col2 = st.columns(2)
+    csv = df.to_csv(index=False).encode('utf-8-sig')
+    col1.download_button("Download CSV Metrics", csv, "batch_performance.csv", "text/csv", use_container_width=True)
+    
+    # 导出 Word
+    doc = Document()
+    doc.add_heading('Multilevel Folder Performance Report', 0)
+    table = doc.add_table(rows=1, cols=len(df.columns))
+    table.style = 'Table Grid'
+    for i, col in enumerate(df.columns): table.rows[0].cells[i].text = col
+    for _, row in df.iterrows():
+        cells = table.add_row().cells
+        for i, val in enumerate(row): cells[i].text = str(val)
+    bio = io.BytesIO()
+    doc.save(bio)
+    col2.download_button("Download Word Summary", bio.getvalue(), "Subdirectory_Performance.docx", use_container_width=True)
