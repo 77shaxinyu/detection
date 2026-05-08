@@ -4,4 +4,3 @@ opencv-python-headless
 pandas
 numpy
 scikit-learn
-python-docx
