@@ -162,7 +162,7 @@ def get_cloud_templates(file_name, path_map):
     return templates
 
 # ==========================================
-# 4. Streamlit UI 界面 (双语版)
+# 4. Streamlit UI 界面
 # ==========================================
 st.set_page_config(page_title="PCB Inspection System / 巡检系统", layout="wide")
 
